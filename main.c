@@ -110,9 +110,10 @@
 ////////////////////////////////////////////////////////////////////////////////
 // INCLUDES & SYSTEM LIBRARIES
 ////////////////////////////////////////////////////////////////////////////////
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #include <ws2tcpip.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -155,6 +156,7 @@ typedef struct PacketHeader {
     uint64_t timestamp_us;    // Microsecond QPC timestamp at transmission
     uint16_t payload_bytes;   // Number of audio bytes in payload
     uint16_t room_id;         // Room identifier
+    uint32_t sender_id;       // Unique peer identifier to track who joined the room
 } PacketHeader;
 
 typedef struct VoicePacket {
@@ -194,6 +196,9 @@ typedef struct TelemetryState {
     double   current_buffer_ms;
     double   crypto_overhead_us;
     double   audio_overhead_us;
+
+    // Live Mic Activity & Peak Level
+    int32_t  mic_peak_level;
 
     // Synchronization
     CRITICAL_SECTION cs;
@@ -298,6 +303,12 @@ static void telemetry_update_buffer_depth(int frames, double frame_duration_ms) 
 static void telemetry_record_crypto_overhead(double us) {
     EnterCriticalSection(&g_telemetry.cs);
     g_telemetry.crypto_overhead_us = us;
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_record_mic_level(int32_t level) {
+    EnterCriticalSection(&g_telemetry.cs);
+    g_telemetry.mic_peak_level = level;
     LeaveCriticalSection(&g_telemetry.cs);
 }
 
@@ -774,16 +785,65 @@ typedef struct RelayServer {
 static RelayServer g_relay;
 
 // Client Network State
+#define MAX_ROOM_PEERS          16
+
+typedef struct PeerPresence {
+    uint32_t sender_id;
+    uint64_t last_seen_us;
+} PeerPresence;
+
 typedef struct NetworkClient {
     SOCKET             sock;
     struct sockaddr_in server_addr;
     uint16_t           room_id;
+    uint32_t           my_sender_id;
     bool               is_connected;
     HANDLE             hRecvThread;
+    PeerPresence       peers[MAX_ROOM_PEERS];
     CRITICAL_SECTION   cs;
 } NetworkClient;
 
 static NetworkClient g_net_client;
+
+static void network_client_record_peer(uint32_t sid, uint64_t now_us) {
+    if (sid == 0 || sid == g_net_client.my_sender_id) return;
+    EnterCriticalSection(&g_net_client.cs);
+    int found = -1;
+    int free_slot = -1;
+    for (int i = 0; i < MAX_ROOM_PEERS; i++) {
+        if (g_net_client.peers[i].sender_id == sid) {
+            found = i;
+            break;
+        } else if (g_net_client.peers[i].sender_id == 0 && free_slot == -1) {
+            free_slot = i;
+        }
+    }
+    if (found != -1) {
+        g_net_client.peers[found].last_seen_us = now_us;
+    } else if (free_slot != -1) {
+        g_net_client.peers[free_slot].sender_id = sid;
+        g_net_client.peers[free_slot].last_seen_us = now_us;
+    }
+    LeaveCriticalSection(&g_net_client.cs);
+}
+
+static int network_client_get_active_peers(void) {
+    if (!g_net_client.is_connected) return 0;
+    uint64_t now_us = telemetry_now_us();
+    int active = 0;
+    EnterCriticalSection(&g_net_client.cs);
+    for (int i = 0; i < MAX_ROOM_PEERS; i++) {
+        if (g_net_client.peers[i].sender_id != 0) {
+            if (now_us - g_net_client.peers[i].last_seen_us <= 3500000) { // Active within last 3.5 seconds
+                active++;
+            } else {
+                g_net_client.peers[i].sender_id = 0; // Pruned inactive peer
+            }
+        }
+    }
+    LeaveCriticalSection(&g_net_client.cs);
+    return active;
+}
 
 // --- Relay Server Implementation ---
 static DWORD WINAPI relay_server_thread(LPVOID param) {
@@ -936,6 +996,9 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
         // Record incoming telemetry metrics
         telemetry_record_recv(bytes, packet.header.sequence, packet.header.timestamp_us);
 
+        // Record peer presence so we know who is in the room
+        network_client_record_peer(packet.header.sender_id, telemetry_now_us());
+
         // Push decrypted voice frame into ultra-low latency ring buffer
         ring_buffer_push(packet.header.sequence, decrypted_pcm, VOICE_FRAME_BYTES);
     }
@@ -948,6 +1011,10 @@ static bool network_client_connect(const char *server_ip, int server_port, uint1
 
     g_net_client.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_net_client.sock == INVALID_SOCKET) return false;
+
+    // Assign randomized unique sender ID for this client session
+    g_net_client.my_sender_id = (uint32_t)GetCurrentProcessId() ^ (uint32_t)telemetry_now_us();
+    if (g_net_client.my_sender_id == 0) g_net_client.my_sender_id = 1;
 
     // Set receive timeout so thread loop can check is_connected flag
     DWORD timeout_ms = 100;
@@ -990,6 +1057,7 @@ static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t 
     packet.header.timestamp_us = telemetry_now_us();
     packet.header.payload_bytes = (uint16_t)bytes;
     packet.header.room_id = g_net_client.room_id;
+    packet.header.sender_id = g_net_client.my_sender_id;
 
     uint64_t t0 = telemetry_now_us();
     bool enc_ok = crypto_encrypt_payload(&packet.header,
@@ -1062,6 +1130,16 @@ static DWORD WINAPI wasapi_capture_thread(LPVOID param) {
 
                     if (accumulated_bytes >= VOICE_FRAME_BYTES) {
                         uint32_t seq = g_audio.capture_seq++;
+
+                        // Calculate Mic Peak Amplitude level for visual mic indicator
+                        int16_t *s16 = (int16_t*)temp_frame;
+                        int32_t peak = 0;
+                        for (int s = 0; s < VOICE_SAMPLES_PER_FRAME; s++) {
+                            int32_t amp = abs((int32_t)s16[s]);
+                            if (amp > peak) peak = amp;
+                        }
+                        telemetry_record_mic_level(peak);
+
                         if (g_audio.loopback_test_mode) {
                             // Direct loopback into local ring buffer for testing
                             ring_buffer_push(seq, temp_frame, VOICE_FRAME_BYTES);
@@ -1268,40 +1346,49 @@ static void audio_engine_cleanup(void) {
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// WIN32 GUI & TELEMETRY HUD (PHASE 6)
+// WIN32 GUI & TELEMETRY HUD (PHASE 6 & INVITE SYSTEM)
 ////////////////////////////////////////////////////////////////////////////////
 #define IDT_TELEMETRY_TIMER     101
 
-#define IDC_EDIT_IP             201
-#define IDC_EDIT_PORT           202
-#define IDC_EDIT_ROOM           203
-#define IDC_EDIT_KEY            204
-#define IDC_CHK_HOST            205
-#define IDC_COMBO_MIC           206
-#define IDC_COMBO_SPK           207
-#define IDC_BTN_CONNECT         208
-#define IDC_BTN_DISCONNECT      209
-#define IDC_CHK_HUD             210
-#define IDC_EDIT_HUD            211
-#define IDC_STATIC_STATUS       212
+#define IDC_EDIT_INVITE         201
+#define IDC_BTN_COPY_INVITE     202
+#define IDC_BTN_PASTE_INVITE    203
+#define IDC_EDIT_IP             204
+#define IDC_EDIT_PORT           205
+#define IDC_EDIT_ROOM           206
+#define IDC_EDIT_KEY            207
+#define IDC_BTN_HOST            208
+#define IDC_BTN_JOIN            209
+#define IDC_BTN_DISCONNECT      210
+#define IDC_COMBO_MIC           211
+#define IDC_COMBO_SPK           212
+#define IDC_CHK_HUD             213
+#define IDC_EDIT_HUD            214
+#define IDC_STATIC_STATUS       215
 
 typedef struct GuiControls {
     HWND hwndMain;
+    HWND hEditInvite;
+    HWND hBtnCopyInvite;
+    HWND hBtnPasteInvite;
     HWND hEditIp;
     HWND hEditPort;
     HWND hEditRoom;
     HWND hEditKey;
-    HWND hChkHost;
+    HWND hBtnHost;
+    HWND hBtnJoin;
+    HWND hBtnDisconnect;
     HWND hComboMic;
     HWND hComboSpk;
-    HWND hBtnConnect;
-    HWND hBtnDisconnect;
     HWND hChkHud;
+    HWND hStaticMic;
+    HWND hStaticPeers;
     HWND hEditHud;
     HWND hStaticStatus;
     HFONT hFontUi;
     HFONT hFontMono;
     bool  is_in_call;
+    bool  is_host;
 } GuiControls;
 
 static GuiControls g_gui;
@@ -1312,6 +1399,101 @@ static void gui_update_status(const char *text) {
     }
 }
 
+static bool copy_to_clipboard(HWND hwnd, const char *text) {
+    if (!text || !OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    size_t len = strlen(text) + 1;
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len);
+    if (!hMem) {
+        CloseClipboard();
+        return false;
+    }
+    void *ptr = GlobalLock(hMem);
+    if (ptr) {
+        memcpy(ptr, text, len);
+        GlobalUnlock(hMem);
+        SetClipboardData(CF_TEXT, hMem);
+    } else {
+        GlobalFree(hMem);
+    }
+    CloseClipboard();
+    return true;
+}
+
+static bool paste_from_clipboard(HWND hwnd, char *out_text, size_t max_len) {
+    if (!out_text || max_len == 0 || !OpenClipboard(hwnd)) return false;
+    HANDLE hData = GetClipboardData(CF_TEXT);
+    if (!hData) {
+        CloseClipboard();
+        return false;
+    }
+    const char *pszText = (const char*)GlobalLock(hData);
+    if (!pszText) {
+        CloseClipboard();
+        return false;
+    }
+    strncpy_s(out_text, max_len, pszText, _TRUNCATE);
+    GlobalUnlock(hData);
+    CloseClipboard();
+    return true;
+}
+
+static void get_local_ip(char *out_ip, size_t max_len) {
+    char hostname[256] = {0};
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        struct hostent *he = gethostbyname(hostname);
+        if (he && he->h_addr_list) {
+            for (int i = 0; he->h_addr_list[i] != NULL; i++) {
+                struct in_addr addr;
+                memcpy(&addr, he->h_addr_list[i], sizeof(struct in_addr));
+                const char *ip_str = inet_ntoa(addr);
+                if (ip_str && strncmp(ip_str, "127.", 4) != 0 && strncmp(ip_str, "169.254.", 8) != 0) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    return;
+                }
+            }
+        }
+    }
+    strncpy_s(out_ip, max_len, "127.0.0.1", _TRUNCATE);
+}
+
+static bool parse_invite_string(const char *invite, char *ip, size_t ip_len, int *port, uint16_t *room, char *key, size_t key_len) {
+    if (!invite) return false;
+    char temp[256];
+    strncpy_s(temp, sizeof(temp), invite, _TRUNCATE);
+
+    char *p = temp;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    size_t len = strlen(p);
+    while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t' || p[len - 1] == '\r' || p[len - 1] == '\n')) {
+        p[--len] = '\0';
+    }
+    if (len == 0) return false;
+
+    // Expected format: <ip>:<port>#<room>#<key>
+    char *colon = strchr(p, ':');
+    if (!colon) return false;
+    *colon = '\0';
+    strncpy_s(ip, ip_len, p, _TRUNCATE);
+
+    char *hash1 = strchr(colon + 1, '#');
+    if (hash1) {
+        *hash1 = '\0';
+        *port = atoi(colon + 1);
+        char *hash2 = strchr(hash1 + 1, '#');
+        if (hash2) {
+            *hash2 = '\0';
+            *room = (uint16_t)atoi(hash1 + 1);
+            strncpy_s(key, key_len, hash2 + 1, _TRUNCATE);
+        } else {
+            *room = (uint16_t)atoi(hash1 + 1);
+        }
+    } else {
+        *port = atoi(colon + 1);
+    }
+    return true;
+}
+
 static void gui_update_hud(void) {
     if (!g_gui.hEditHud || !IsWindow(g_gui.hEditHud)) return;
 
@@ -1320,19 +1502,54 @@ static void gui_update_hud(void) {
     TelemetryState snap;
     telemetry_get_snapshot(&snap);
 
-    char hud_text[1024];
+    int active_peers = network_client_get_active_peers();
+    char mic_str[64];
+    char peer_str[64];
+
+    if (g_gui.is_in_call) {
+        if (snap.mic_peak_level > 600) {
+            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: TRANSMITTING ] (Level: %d)", snap.mic_peak_level);
+        } else {
+            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: IDLE (Silence) ]");
+        }
+
+        if (active_peers == 0) {
+            snprintf(peer_str, sizeof(peer_str), "Room: Waiting for peers (1 in room)");
+        } else {
+            snprintf(peer_str, sizeof(peer_str), "● Room: %d Peer(s) Online (%d in room)", active_peers, active_peers + 1);
+        }
+    } else {
+        strcpy_s(mic_str, sizeof(mic_str), "[ ○ MIC: OFF ]");
+        strcpy_s(peer_str, sizeof(peer_str), "Room: Disconnected");
+    }
+
+    if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, mic_str);
+    if (g_gui.hStaticPeers) SetWindowTextA(g_gui.hStaticPeers, peer_str);
+
+    // ASCII volume meter bar (0 to 20 bars)
+    char mic_bar[21];
+    int bars = (snap.mic_peak_level * 20) / 10000;
+    if (bars > 20) bars = 20;
+    for (int b = 0; b < 20; b++) mic_bar[b] = (b < bars) ? '|' : ' ';
+    mic_bar[20] = '\0';
+
+    char hud_text[1200];
     snprintf(hud_text, sizeof(hud_text),
         "================== LIVE TELEMETRY HUD ==================\r\n"
-        " Audio Engine:    WASAPI 16 kHz 16-bit Mono (Uncompressed PCM)\r\n"
-        " Encryption:      Windows Native BCrypt AES-GCM (Hardware AES-NI)\r\n"
+        " Room Status:     %s\r\n"
+        " Room Presence:   %d Peers Online (%d people in call)\r\n"
+        " Mic Activity:    [%s] %s\r\n"
         " -------------------------------------------------------\r\n"
         " Bandwidth OUT:   %6.2f KB/s   | Bandwidth IN:    %6.2f KB/s\r\n"
         " Round-Trip Time: %6.2f ms     | Jitter (RFC3550):%6.2f ms\r\n"
         " Packets Sent:    %6llu        | Packets Recv:    %6llu\r\n"
         " Packet Loss:     %6.2f %%      | Out-of-Order:    %6llu\r\n"
         " Ring Buffer:     %2d slot (%4.1f ms) [Target Floor: 10-15 ms]\r\n"
-        " AES Crypto Time: %6.2f us / frame\r\n"
+        " AES Crypto Time: %6.2f us / frame (Hardware AES-NI)\r\n"
         "========================================================\r\n",
+        g_gui.is_in_call ? (g_gui.is_host ? "HOSTING & STREAMING" : "CONNECTED & STREAMING") : "DISCONNECTED",
+        active_peers, g_gui.is_in_call ? (active_peers + 1) : 0,
+        mic_bar, (snap.mic_peak_level > 600) ? "TRANSMITTING VOICE" : "IDLE",
         snap.kb_per_sec_out, snap.kb_per_sec_in,
         snap.last_rtt_ms, snap.jitter_ms,
         (unsigned long long)snap.total_packets_sent, (unsigned long long)snap.total_packets_recv,
@@ -1343,7 +1560,87 @@ static void gui_update_hud(void) {
     SetWindowTextA(g_gui.hEditHud, hud_text);
 }
 
-static void gui_handle_connect(void) {
+static void gui_handle_host(void) {
+    char port_str[16] = {0};
+    char room_str[16] = {0};
+    char key[128] = {0};
+    char local_ip[64] = {0};
+
+    GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
+    GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
+    GetWindowTextA(g_gui.hEditKey, key, sizeof(key));
+
+    int port = atoi(port_str);
+    if (port <= 0 || port > 65535) port = DEFAULT_RELAY_PORT;
+
+    uint16_t room_id = (uint16_t)atoi(room_str);
+    if (room_id == 0) room_id = 1;
+
+    if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
+
+    // Discover LAN/WLAN IP to include in invite
+    get_local_ip(local_ip, sizeof(local_ip));
+    SetWindowTextA(g_gui.hEditIp, local_ip);
+
+    // Format invite string: <local_ip>:<port>#<room>#<key>
+    char invite_str[256];
+    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", local_ip, port, room_id, key);
+    SetWindowTextA(g_gui.hEditInvite, invite_str);
+
+    // Automatically copy invite to clipboard for convenience
+    copy_to_clipboard(g_gui.hwndMain, invite_str);
+
+    // 1. Start Relay Server on this machine
+    if (!relay_server_start(port)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
+        return;
+    }
+
+    // 2. Initialize crypto with pre-shared key
+    if (!crypto_init(key)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to initialize Windows AES-GCM cryptography!", "Error", MB_ICONERROR);
+        relay_server_stop();
+        return;
+    }
+
+    // 3. Connect local UDP client to loopback 127.0.0.1 for zero overhead
+    if (!network_client_connect("127.0.0.1", port, room_id)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to connect client to local relay!", "Error", MB_ICONERROR);
+        crypto_cleanup();
+        relay_server_stop();
+        return;
+    }
+
+    // 4. Start WASAPI Audio Engine
+    int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
+    int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
+
+    if (!audio_engine_start(mic_idx, spk_idx, false)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
+        network_client_disconnect();
+        crypto_cleanup();
+        relay_server_stop();
+        return;
+    }
+
+    g_gui.is_in_call = true;
+    g_gui.is_host = true;
+
+    EnableWindow(g_gui.hBtnHost, FALSE);
+    EnableWindow(g_gui.hBtnJoin, FALSE);
+    EnableWindow(g_gui.hBtnPasteInvite, FALSE);
+    EnableWindow(g_gui.hBtnDisconnect, TRUE);
+    EnableWindow(g_gui.hEditIp, FALSE);
+    EnableWindow(g_gui.hEditPort, FALSE);
+    EnableWindow(g_gui.hEditRoom, FALSE);
+    EnableWindow(g_gui.hEditKey, FALSE);
+
+    char status_buf[256];
+    snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d | Invite copied to clipboard!", room_id, port);
+    gui_update_status(status_buf);
+}
+
+static void gui_handle_join(void) {
     char ip[64] = {0};
     char port_str[16] = {0};
     char room_str[16] = {0};
@@ -1363,32 +1660,25 @@ static void gui_handle_connect(void) {
     if (strlen(ip) == 0) strcpy_s(ip, sizeof(ip), "127.0.0.1");
     if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
 
-    bool host_relay = (SendMessage(g_gui.hChkHost, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    // Format invite string into edit box
+    char invite_str[256];
+    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", ip, port, room_id, key);
+    SetWindowTextA(g_gui.hEditInvite, invite_str);
 
-    // 1. If hosting relay server, start it
-    if (host_relay) {
-        if (!relay_server_start(port)) {
-            MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on specified port!", "Error", MB_ICONERROR);
-            return;
-        }
-    }
-
-    // 2. Initialize crypto with pre-shared key
+    // 1. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize Windows AES-GCM cryptography!", "Error", MB_ICONERROR);
-        if (host_relay) relay_server_stop();
         return;
     }
 
-    // 3. Connect UDP network client
+    // 2. Connect UDP network client
     if (!network_client_connect(ip, port, room_id)) {
-        MessageBoxA(g_gui.hwndMain, "Failed to connect UDP client!", "Error", MB_ICONERROR);
+        MessageBoxA(g_gui.hwndMain, "Failed to connect UDP client to host!", "Error", MB_ICONERROR);
         crypto_cleanup();
-        if (host_relay) relay_server_stop();
         return;
     }
 
-    // 4. Start WASAPI Audio Engine with selected devices
+    // 3. Start WASAPI Audio Engine with selected devices
     int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
     int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
 
@@ -1396,23 +1686,77 @@ static void gui_handle_connect(void) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
         network_client_disconnect();
         crypto_cleanup();
-        if (host_relay) relay_server_stop();
         return;
     }
 
     g_gui.is_in_call = true;
-    EnableWindow(g_gui.hBtnConnect, FALSE);
+    g_gui.is_host = false;
+
+    EnableWindow(g_gui.hBtnHost, FALSE);
+    EnableWindow(g_gui.hBtnJoin, FALSE);
+    EnableWindow(g_gui.hBtnPasteInvite, FALSE);
     EnableWindow(g_gui.hBtnDisconnect, TRUE);
-    EnableWindow(g_gui.hChkHost, FALSE);
     EnableWindow(g_gui.hEditIp, FALSE);
     EnableWindow(g_gui.hEditPort, FALSE);
     EnableWindow(g_gui.hEditRoom, FALSE);
     EnableWindow(g_gui.hEditKey, FALSE);
 
-    char status_buf[128];
-    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d %s",
-             room_id, ip, port, host_relay ? "(Hosting Relay)" : "");
+    char status_buf[256];
+    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d", room_id, ip, port);
     gui_update_status(status_buf);
+}
+
+static void gui_handle_copy_invite(void) {
+    char invite_str[256] = {0};
+    GetWindowTextA(g_gui.hEditInvite, invite_str, sizeof(invite_str));
+    if (strlen(invite_str) == 0) {
+        char ip[64] = {0}, port_str[16] = {0}, room_str[16] = {0}, key[128] = {0};
+        GetWindowTextA(g_gui.hEditIp, ip, sizeof(ip));
+        GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
+        GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
+        GetWindowTextA(g_gui.hEditKey, key, sizeof(key));
+        if (strlen(ip) == 0) get_local_ip(ip, sizeof(ip));
+        if (strlen(port_str) == 0) strcpy_s(port_str, sizeof(port_str), "7777");
+        if (strlen(room_str) == 0) strcpy_s(room_str, sizeof(room_str), "1");
+        if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
+        snprintf(invite_str, sizeof(invite_str), "%s:%s#%s#%s", ip, port_str, room_str, key);
+        SetWindowTextA(g_gui.hEditInvite, invite_str);
+    }
+    if (copy_to_clipboard(g_gui.hwndMain, invite_str)) {
+        gui_update_status("Invite copied to clipboard! Send it to your friends.");
+    } else {
+        gui_update_status("Failed to access clipboard.");
+    }
+}
+
+static void gui_handle_paste_invite(void) {
+    char clip_str[256] = {0};
+    if (!paste_from_clipboard(g_gui.hwndMain, clip_str, sizeof(clip_str)) || strlen(clip_str) == 0) {
+        gui_update_status("Clipboard is empty or does not contain valid text.");
+        return;
+    }
+
+    char ip[64] = {0};
+    int port = 7777;
+    uint16_t room = 1;
+    char key[128] = {0};
+
+    if (parse_invite_string(clip_str, ip, sizeof(ip), &port, &room, key, sizeof(key))) {
+        SetWindowTextA(g_gui.hEditInvite, clip_str);
+        SetWindowTextA(g_gui.hEditIp, ip);
+
+        char port_str[16], room_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+        snprintf(room_str, sizeof(room_str), "%u", room);
+        SetWindowTextA(g_gui.hEditPort, port_str);
+        SetWindowTextA(g_gui.hEditRoom, room_str);
+        if (strlen(key) > 0) {
+            SetWindowTextA(g_gui.hEditKey, key);
+        }
+        gui_update_status("Invite loaded! Click 'Join Existing Room' to connect.");
+    } else {
+        gui_update_status("Could not parse invite string. Format: IP:Port#Room#Key");
+    }
 }
 
 static void gui_handle_disconnect(void) {
@@ -1420,18 +1764,25 @@ static void gui_handle_disconnect(void) {
 
     audio_engine_stop();
     network_client_disconnect();
-    relay_server_stop();
+    if (g_gui.is_host) {
+        relay_server_stop();
+    }
     crypto_cleanup();
 
     g_gui.is_in_call = false;
-    EnableWindow(g_gui.hBtnConnect, TRUE);
+    g_gui.is_host = false;
+
+    EnableWindow(g_gui.hBtnHost, TRUE);
+    EnableWindow(g_gui.hBtnJoin, TRUE);
+    EnableWindow(g_gui.hBtnPasteInvite, TRUE);
     EnableWindow(g_gui.hBtnDisconnect, FALSE);
-    EnableWindow(g_gui.hChkHost, TRUE);
     EnableWindow(g_gui.hEditIp, TRUE);
     EnableWindow(g_gui.hEditPort, TRUE);
     EnableWindow(g_gui.hEditRoom, TRUE);
     EnableWindow(g_gui.hEditKey, TRUE);
 
+    if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, "[ ○ MIC: OFF ]");
+    if (g_gui.hStaticPeers) SetWindowTextA(g_gui.hStaticPeers, "Room: Disconnected");
     gui_update_status("Disconnected. Ready to connect.");
 }
 
@@ -1446,43 +1797,64 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                           ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                           DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
 
-            // Group 1: Connection & Room Settings
-            CreateWindowA("BUTTON", " Connection & Room Settings ",
+            // Group 1: Room & Connection Settings
+            CreateWindowA("BUTTON", " Room & Connection Setup ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 10, 515, 140, hwnd, NULL, NULL, NULL);
+                          15, 10, 525, 160, hwnd, NULL, NULL, NULL);
 
-            CreateWindowA("STATIC", "Relay IP:", WS_CHILD | WS_VISIBLE, 30, 35, 60, 20, hwnd, NULL, NULL, NULL);
+            // Invite Code row:
+            CreateWindowA("STATIC", "Invite Code:", WS_CHILD | WS_VISIBLE, 25, 32, 75, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditInvite = CreateWindowA("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                              105, 30, 240, 22, hwnd, (HMENU)IDC_EDIT_INVITE, NULL, NULL);
+
+            g_gui.hBtnCopyInvite = CreateWindowA("BUTTON", "Copy Invite", WS_CHILD | WS_VISIBLE,
+                                                 355, 29, 85, 24, hwnd, (HMENU)IDC_BTN_COPY_INVITE, NULL, NULL);
+
+            g_gui.hBtnPasteInvite = CreateWindowA("BUTTON", "Paste Invite", WS_CHILD | WS_VISIBLE,
+                                                  445, 29, 85, 24, hwnd, (HMENU)IDC_BTN_PASTE_INVITE, NULL, NULL);
+
+            // Manual Connection Details row:
+            CreateWindowA("STATIC", "Host IP:", WS_CHILD | WS_VISIBLE, 25, 64, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditIp = CreateWindowA("EDIT", "127.0.0.1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                          95, 33, 140, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
+                                          80, 62, 130, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
 
-            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 250, 35, 40, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 220, 64, 35, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditPort = CreateWindowA("EDIT", "7777", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            295, 33, 60, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
+                                            255, 62, 50, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
 
-            g_gui.hChkHost = CreateWindowA("BUTTON", "Host Relay Server on this PC",
-                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                           370, 35, 150, 20, hwnd, (HMENU)IDC_CHK_HOST, NULL, NULL);
-
-            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 30, 68, 60, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 315, 64, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditRoom = CreateWindowA("EDIT", "1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            95, 66, 60, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
+                                            370, 62, 45, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
 
-            CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 175, 68, 70, 20, hwnd, NULL, NULL, NULL);
-            g_gui.hEditKey = CreateWindowA("EDIT", "voicechat2026", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
-                                           250, 66, 260, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
+            CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 25, 94, 70, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditKey = CreateWindowA("EDIT", "voicechat2026", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                           100, 92, 315, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
 
-            // Group 2: Audio Devices
+            // Distinct Action Buttons:
+            g_gui.hBtnHost = CreateWindowA("BUTTON", "Create && Host Room",
+                                           WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                           25, 124, 165, 34, hwnd, (HMENU)IDC_BTN_HOST, NULL, NULL);
+
+            g_gui.hBtnJoin = CreateWindowA("BUTTON", "Join Existing Room",
+                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                           200, 124, 165, 34, hwnd, (HMENU)IDC_BTN_JOIN, NULL, NULL);
+
+            g_gui.hBtnDisconnect = CreateWindowA("BUTTON", "Disconnect",
+                                                 WS_CHILD | WS_VISIBLE | WS_DISABLED,
+                                                 375, 124, 155, 34, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
+
+            // Group 2: Audio Hardware
             CreateWindowA("BUTTON", " Audio Hardware (WASAPI Event-Driven) ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 155, 515, 95, hwnd, NULL, NULL, NULL);
+                          15, 180, 525, 88, hwnd, NULL, NULL, NULL);
 
-            CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 30, 180, 80, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 25, 204, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboMic = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            115, 177, 395, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
+                                            110, 201, 420, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
 
-            CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 30, 215, 80, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 25, 236, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboSpk = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            115, 212, 395, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+                                            110, 233, 420, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
 
             // Populate Audio Device Dropdowns
             for (int i = 0; i < g_audio.capture_devices.count; i++) {
@@ -1499,30 +1871,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessage(g_gui.hComboSpk, CB_SETCURSEL, (WPARAM)g_audio.render_devices.default_index, 0);
             }
 
-            // Action Buttons
-            g_gui.hBtnConnect = CreateWindowA("BUTTON", "Connect / Join Room",
-                                              WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                              15, 260, 180, 32, hwnd, (HMENU)IDC_BTN_CONNECT, NULL, NULL);
+            // Live Indicators: Mic Activity & Room Presence
+            g_gui.hStaticMic = CreateWindowA("STATIC", "[ ○ MIC: OFF ]",
+                                             WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                             15, 278, 240, 20, hwnd, NULL, NULL, NULL);
 
-            g_gui.hBtnDisconnect = CreateWindowA("BUTTON", "Disconnect",
-                                                 WS_CHILD | WS_VISIBLE | WS_DISABLED,
-                                                 205, 260, 140, 32, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
+            g_gui.hStaticPeers = CreateWindowA("STATIC", "Room: Disconnected",
+                                               WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                                               260, 278, 170, 20, hwnd, NULL, NULL, NULL);
 
-            g_gui.hChkHud = CreateWindowA("BUTTON", "Show Live Telemetry HUD",
+            g_gui.hChkHud = CreateWindowA("BUTTON", "Live Telemetry",
                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                          360, 266, 170, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
+                                          440, 278, 100, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
             SendMessage(g_gui.hChkHud, BM_SETCHECK, BST_CHECKED, 0);
 
             // Live Telemetry Readout Box
             g_gui.hEditHud = CreateWindowA("EDIT", "",
                                            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-                                           15, 302, 515, 175, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
+                                           15, 302, 525, 160, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
             SendMessage(g_gui.hEditHud, WM_SETFONT, (WPARAM)g_gui.hFontMono, TRUE);
 
             // Status Bar Label
-            g_gui.hStaticStatus = CreateWindowA("STATIC", "Ready to connect.",
+            g_gui.hStaticStatus = CreateWindowA("STATIC", "Ready. Host a room or join with an invite code.",
                                                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                                15, 485, 515, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+                                                15, 472, 525, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
 
             // Apply system fonts to all controls
             HWND child = GetWindow(hwnd, GW_CHILD);
@@ -1551,10 +1923,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_COMMAND: {
             WORD id = LOWORD(wParam);
-            if (id == IDC_BTN_CONNECT) {
-                gui_handle_connect();
+            if (id == IDC_BTN_HOST) {
+                gui_handle_host();
+            } else if (id == IDC_BTN_JOIN) {
+                gui_handle_join();
             } else if (id == IDC_BTN_DISCONNECT) {
                 gui_handle_disconnect();
+            } else if (id == IDC_BTN_COPY_INVITE) {
+                gui_handle_copy_invite();
+            } else if (id == IDC_BTN_PASTE_INVITE) {
+                gui_handle_paste_invite();
             }
             break;
         }
@@ -1609,7 +1987,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                                 "preAlphaVoiceChat - Win32 Low-Latency Voice Client",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
-                                560, 550,
+                                575, 545,
                                 NULL, NULL, hInstance, NULL);
 
     if (!hwnd) {
