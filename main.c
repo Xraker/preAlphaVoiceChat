@@ -1,0 +1,1643 @@
+/*
+////////////////////////////////////////////////////////////////////////////////
+// ANTIGRAVITY MUST OBEY RULES
+////////////////////////////////////////////////////////////////////////////////
+// 1. Any deletion of a file must be asked and confirmed with the user before proceeding.
+// 2. Any download of files, packages, or tools must be asked and confirmed with the user before proceeding.
+// 3. Git must not be used unless the user specifically asks for it.
+// 4. Agents must not be used unless the user specifically asks for it.
+// 5. Speak English in general.
+// 6. MUST use the .bat file (build.bat) to build the project at all times.
+// 7. Single C source file architecture: keep code grouped with //////// borders.
+// 8. Do not start implementation coding until explicitly instructed by the user.
+
+////////////////////////////////////////////////////////////////////////////////
+// TO-DO LIST (DEFERRED - NOT BEING IMPLEMENTED THIS SESSION)
+////////////////////////////////////////////////////////////////////////////////
+// [ ] Audio Compression (Opus / Codecs):
+//     - Defer integrating Opus or other compression libraries.
+//     - Start with raw 16 kHz uncompressed PCM (~32 KB/s) to verify baseline audio.
+//     - Measure latency and bandwidth before deciding on compression.
+// [ ] Push-to-Talk (PTT) & Shortcuts:
+//     - Global keyboard hooks / GetAsyncKeyState bindings for hotkeys.
+//     - Hold-to-speak logic.
+// [ ] UI Volume & Gain Sliders:
+//     - Input gain adjustment slider.
+//     - Output playback volume slider.
+//     - Dedicated Mute microphone button.
+// [ ] Acoustic Echo Cancellation (AEC) & Noise Suppression:
+//     - Users are expected to wear headphones for early versions.
+//     - Advanced DSP echo suppression deferred.
+// [ ] Complex NAT Traversal (STUN / TURN / ICE):
+//     - Solved by using the lightweight Relay Server architecture.
+// [ ] Dynamic Adaptive Jitter Buffer:
+//     - Starting with the simplest fixed ring buffer.
+//     - Advanced adaptive time-stretching / drift compensation deferred.
+// [ ] Multi-Room Hierarchy & User Management:
+//     - User avatars, member list panes, permission systems.
+
+////////////////////////////////////////////////////////////////////////////////
+// PROJECT DOCUMENTATION & DESIGN DECISIONS
+////////////////////////////////////////////////////////////////////////////////
+// Project Name:
+//   preAlphaVoiceChat
+//
+// Description:
+//   A lightweight, low-latency voice chat program written purely in C targeting
+//   the native Windows 32-bit/64-bit API. Operates over the public internet
+//   using a lightweight UDP relay server and native Win32 client.
+//
+// Core Design Decisions:
+//   1. Language & Environment:
+//      - Pure C (C99/C11) compiled with Clang targeting Windows MSVC ABI.
+//      - Single unified source file (main.c) with visual section dividers.
+//      - Built exclusively via build.bat with zero external package downloads.
+//
+//   2. Audio Engine (WASAPI):
+//      - Low-latency Windows Audio Session API (WASAPI) in event-driven mode
+//        (AUDCLNT_STREAMFLAGS_EVENTCALLBACK).
+//      - Interface accessed in pure C via COM vtables (lpVtbl).
+//      - Real-time priority assigned via AvSetMmThreadCharacteristics ("Pro Audio").
+//      - Format: 16,000 Hz, 16-bit Mono raw PCM (Wideband voice, crystal clear,
+//        ~32 KB/s bandwidth).
+//      - Device handling: Enumerates audio endpoints, defaults to system default.
+//
+//   3. Networking & Topology:
+//      - Lightweight Central UDP Relay Server + Client in one binary.
+//      - Overcomes NAT traversal / firewall hurdles on the public internet without
+//        requiring complex STUN/TURN implementations.
+//      - Transport: Winsock2 UDP (SOCK_DGRAM) for immediate, non-blocking delivery.
+//
+//   4. Buffer & Latency Strategy:
+//      - Simplest ring buffer with sequence number tracking to detect dropped
+//        or out-of-order packets.
+//      - Configured for ultra-low latency floor (~3ms to 15ms target when conditions
+//        are optimal).
+//
+//   5. Security & Encryption:
+//      - Windows native Cryptography Next Generation (CNG / bcrypt.dll).
+//      - AES encryption with a Pre-Shared Key (PSK). Zero external crypto libraries.
+//      - Microsecond execution time via CPU hardware AES-NI instructions.
+//
+//   6. Telemetry & Measurement Engine:
+//      - Live toggleable performance metrics:
+//        * Outgoing & Incoming bandwidth (KB/s).
+//        * Round-Trip Time (RTT) / Latency (ms).
+//        * Packet Loss % and out-of-order count.
+//        * RFC 3550 Jitter calculation (ms).
+//        * Ring buffer depth / watermark.
+//        * Processing time overhead (microseconds per audio frame).
+//
+//   7. User Interface:
+//      - Minimal native Win32 GUI window (CreateWindowEx, standard controls).
+//      - Connection input fields (Relay IP, Port, Room/Key).
+//      - Connect / Disconnect and Telemetry Toggle buttons.
+//
+// Must Do:
+//   - Keep code strictly in pure C within main.c, organized with /////// dividers.
+//   - Always compile and link using build.bat.
+//   - Keep external dependencies at 0 (only link standard Windows DLLs).
+//   - Always ask before downloading any files/packages or deleting any files.
+//
+// Must Not Do:
+//   - Do not use Git commands unless explicitly requested.
+//   - Do not invoke automated agents unless explicitly requested.
+//   - Do not download third-party libraries (FFmpeg, Opus, libsodium) at this stage.
+//   - Do not start implementation code until confirmed by the user.
+////////////////////////////////////////////////////////////////////////////////
+*/
+
+////////////////////////////////////////////////////////////////////////////////
+// INCLUDES & SYSTEM LIBRARIES
+////////////////////////////////////////////////////////////////////////////////
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <avrt.h>
+#include <bcrypt.h>
+#include <commctrl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+////////////////////////////////////////////////////////////////////////////////
+// COMPILER PRAGMA LINKERS (FOR MSVC / CLANG-CL COMPATIBILITY)
+////////////////////////////////////////////////////////////////////////////////
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "avrt.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "comctl32.lib")
+
+////////////////////////////////////////////////////////////////////////////////
+// CONSTANTS, PACKET STRUCTS & TYPES
+////////////////////////////////////////////////////////////////////////////////
+#define VOICE_SAMPLE_RATE       16000
+#define VOICE_CHANNELS          1
+#define VOICE_BITS_PER_SAMPLE   16
+#define VOICE_FRAME_MS          10
+#define VOICE_SAMPLES_PER_FRAME ((VOICE_SAMPLE_RATE * VOICE_FRAME_MS) / 1000) // 160 samples
+#define VOICE_FRAME_BYTES       (VOICE_SAMPLES_PER_FRAME * (VOICE_BITS_PER_SAMPLE / 8)) // 320 bytes
+
+#define PACKET_MAGIC            0x56434854 // "VCHT" in hex (Voice Chat)
+#define MAX_PAYLOAD_SIZE        512
+
+#pragma pack(push, 1)
+typedef struct PacketHeader {
+    uint32_t magic;           // PACKET_MAGIC
+    uint32_t sequence;        // Monotonically increasing packet sequence number
+    uint64_t timestamp_us;    // Microsecond QPC timestamp at transmission
+    uint16_t payload_bytes;   // Number of audio bytes in payload
+    uint16_t room_id;         // Room identifier
+} PacketHeader;
+
+typedef struct VoicePacket {
+    PacketHeader header;
+    uint8_t payload[MAX_PAYLOAD_SIZE];
+} VoicePacket;
+#pragma pack(pop)
+
+////////////////////////////////////////////////////////////////////////////////
+// TELEMETRY & METRICS ENGINE (PHASE 1)
+////////////////////////////////////////////////////////////////////////////////
+typedef struct TelemetryState {
+    int64_t  qpc_frequency;
+    
+    // Bandwidth calculation (sliding 1-second window)
+    uint64_t last_calc_time_us;
+    uint64_t bytes_sent_period;
+    uint64_t bytes_recv_period;
+    double   kb_per_sec_out;
+    double   kb_per_sec_in;
+
+    // Packet sequence & loss tracking
+    uint32_t last_recv_seq;
+    uint64_t total_packets_sent;
+    uint64_t total_packets_recv;
+    uint64_t total_packets_lost;
+    uint64_t out_of_order_count;
+    double   packet_loss_pct;
+
+    // Latency and RFC 3550 Jitter
+    double   last_rtt_ms;
+    double   jitter_ms;
+    uint64_t last_transit_diff_us;
+
+    // Buffer Depth and Overhead
+    int      current_buffer_frames;
+    double   current_buffer_ms;
+    double   crypto_overhead_us;
+    double   audio_overhead_us;
+
+    // Synchronization
+    CRITICAL_SECTION cs;
+} TelemetryState;
+
+static TelemetryState g_telemetry;
+
+static void telemetry_init(void) {
+    memset(&g_telemetry, 0, sizeof(g_telemetry));
+    InitializeCriticalSection(&g_telemetry.cs);
+
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    g_telemetry.qpc_frequency = freq.QuadPart;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_telemetry.last_calc_time_us = (uint64_t)((now.QuadPart * 1000000) / g_telemetry.qpc_frequency);
+}
+
+static uint64_t telemetry_now_us(void) {
+    if (g_telemetry.qpc_frequency == 0) return 0;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart * 1000000) / g_telemetry.qpc_frequency);
+}
+
+static void telemetry_record_send(size_t bytes) {
+    EnterCriticalSection(&g_telemetry.cs);
+    g_telemetry.bytes_sent_period += bytes;
+    g_telemetry.total_packets_sent++;
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_record_recv(size_t bytes, uint32_t seq, uint64_t send_time_us) {
+    uint64_t now_us = telemetry_now_us();
+
+    EnterCriticalSection(&g_telemetry.cs);
+    g_telemetry.bytes_recv_period += bytes;
+    g_telemetry.total_packets_recv++;
+
+    // Sequence tracking & loss estimation
+    if (g_telemetry.total_packets_recv == 1) {
+        g_telemetry.last_recv_seq = seq;
+    } else {
+        if (seq > g_telemetry.last_recv_seq + 1) {
+            uint32_t lost = seq - (g_telemetry.last_recv_seq + 1);
+            g_telemetry.total_packets_lost += lost;
+            g_telemetry.last_recv_seq = seq;
+        } else if (seq <= g_telemetry.last_recv_seq) {
+            g_telemetry.out_of_order_count++;
+        } else {
+            g_telemetry.last_recv_seq = seq;
+        }
+    }
+
+    uint64_t total_expected = g_telemetry.total_packets_recv + g_telemetry.total_packets_lost;
+    if (total_expected > 0) {
+        g_telemetry.packet_loss_pct = ((double)g_telemetry.total_packets_lost * 100.0) / (double)total_expected;
+    }
+
+    // RFC 3550 Jitter calculation: D(i, j) = (R_j - S_j) - (R_i - S_i)
+    if (send_time_us > 0 && now_us >= send_time_us) {
+        uint64_t transit_us = now_us - send_time_us;
+        if (g_telemetry.total_packets_recv > 1) {
+            int64_t diff = (int64_t)transit_us - (int64_t)g_telemetry.last_transit_diff_us;
+            if (diff < 0) diff = -diff;
+            double diff_ms = (double)diff / 1000.0;
+            g_telemetry.jitter_ms += (diff_ms - g_telemetry.jitter_ms) / 16.0;
+        }
+        g_telemetry.last_transit_diff_us = transit_us;
+        g_telemetry.last_rtt_ms = (double)transit_us / 1000.0;
+    }
+
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_update_bandwidth(void) {
+    uint64_t now_us = telemetry_now_us();
+    EnterCriticalSection(&g_telemetry.cs);
+
+    uint64_t elapsed_us = now_us - g_telemetry.last_calc_time_us;
+    if (elapsed_us >= 1000000) { // 1 second window
+        double elapsed_sec = (double)elapsed_us / 1000000.0;
+        g_telemetry.kb_per_sec_out = ((double)g_telemetry.bytes_sent_period / 1024.0) / elapsed_sec;
+        g_telemetry.kb_per_sec_in  = ((double)g_telemetry.bytes_recv_period / 1024.0) / elapsed_sec;
+        g_telemetry.bytes_sent_period = 0;
+        g_telemetry.bytes_recv_period = 0;
+        g_telemetry.last_calc_time_us = now_us;
+    }
+
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_update_buffer_depth(int frames, double frame_duration_ms) {
+    EnterCriticalSection(&g_telemetry.cs);
+    g_telemetry.current_buffer_frames = frames;
+    g_telemetry.current_buffer_ms = frames * frame_duration_ms;
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_record_crypto_overhead(double us) {
+    EnterCriticalSection(&g_telemetry.cs);
+    g_telemetry.crypto_overhead_us = us;
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+static void telemetry_get_snapshot(TelemetryState *out) {
+    if (!out) return;
+    EnterCriticalSection(&g_telemetry.cs);
+    memcpy(out, &g_telemetry, sizeof(TelemetryState));
+    LeaveCriticalSection(&g_telemetry.cs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// BCRYPT AES CRYPTOGRAPHY (PHASE 2)
+////////////////////////////////////////////////////////////////////////////////
+#define AES_KEY_BYTES           32  // AES-256
+#define AES_GCM_NONCE_BYTES     12  // Standard GCM 96-bit nonce
+#define AES_GCM_TAG_BYTES       16  // 128-bit authentication tag
+
+typedef struct CryptoContext {
+    BCRYPT_ALG_HANDLE hAesAlg;
+    BCRYPT_ALG_HANDLE hShaAlg;
+    BCRYPT_KEY_HANDLE hKey;
+    uint8_t           key_buffer[AES_KEY_BYTES];
+    bool              initialized;
+    CRITICAL_SECTION  cs;
+} CryptoContext;
+
+static CryptoContext g_crypto;
+
+static bool crypto_init(const char *passphrase) {
+    memset(&g_crypto, 0, sizeof(g_crypto));
+    InitializeCriticalSection(&g_crypto.cs);
+
+    if (!passphrase || strlen(passphrase) == 0) {
+        passphrase = "preAlphaVoiceChatDefaultKey2026";
+    }
+
+    NTSTATUS status;
+
+    // 1. Open SHA-256 algorithm to derive 256-bit key from passphrase
+    status = BCryptOpenAlgorithmProvider(&g_crypto.hShaAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+    if (!BCRYPT_SUCCESS(status)) return false;
+
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    status = BCryptCreateHash(g_crypto.hShaAlg, &hHash, NULL, 0, NULL, 0, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    status = BCryptHashData(hHash, (PUCHAR)passphrase, (ULONG)strlen(passphrase), 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptDestroyHash(hHash);
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    status = BCryptFinishHash(hHash, g_crypto.key_buffer, AES_KEY_BYTES, 0);
+    BCryptDestroyHash(hHash);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    // 2. Open AES algorithm and set chaining mode to GCM
+    status = BCryptOpenAlgorithmProvider(&g_crypto.hAesAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    status = BCryptSetProperty(g_crypto.hAesAlg,
+                               BCRYPT_CHAINING_MODE,
+                               (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
+                               sizeof(BCRYPT_CHAIN_MODE_GCM),
+                               0);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptCloseAlgorithmProvider(g_crypto.hAesAlg, 0);
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    // 3. Generate symmetric key object from SHA-256 hash
+    status = BCryptGenerateSymmetricKey(g_crypto.hAesAlg,
+                                        &g_crypto.hKey,
+                                        NULL,
+                                        0,
+                                        g_crypto.key_buffer,
+                                        AES_KEY_BYTES,
+                                        0);
+    if (!BCRYPT_SUCCESS(status)) {
+        BCryptCloseAlgorithmProvider(g_crypto.hAesAlg, 0);
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        return false;
+    }
+
+    g_crypto.initialized = true;
+    return true;
+}
+
+static void crypto_cleanup(void) {
+    EnterCriticalSection(&g_crypto.cs);
+    if (g_crypto.hKey) {
+        BCryptDestroyKey(g_crypto.hKey);
+        g_crypto.hKey = NULL;
+    }
+    if (g_crypto.hAesAlg) {
+        BCryptCloseAlgorithmProvider(g_crypto.hAesAlg, 0);
+        g_crypto.hAesAlg = NULL;
+    }
+    if (g_crypto.hShaAlg) {
+        BCryptCloseAlgorithmProvider(g_crypto.hShaAlg, 0);
+        g_crypto.hShaAlg = NULL;
+    }
+    g_crypto.initialized = false;
+    LeaveCriticalSection(&g_crypto.cs);
+    DeleteCriticalSection(&g_crypto.cs);
+}
+
+// Encrypts payload in-place or into out_buf, authenticating header as Additional Authenticated Data (AAD)
+static bool crypto_encrypt_payload(const PacketHeader *header,
+                                   const uint8_t *plaintext,
+                                   uint32_t plaintext_len,
+                                   uint8_t *ciphertext_out,
+                                   uint8_t *nonce_out,
+                                   uint8_t *tag_out) {
+    if (!g_crypto.initialized || !header || !plaintext || !ciphertext_out) return false;
+
+    // Generate unique 12-byte GCM nonce using packet sequence & timestamp
+    memset(nonce_out, 0, AES_GCM_NONCE_BYTES);
+    memcpy(nonce_out, &header->sequence, sizeof(header->sequence));
+    memcpy(nonce_out + 4, &header->timestamp_us, sizeof(uint64_t));
+
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+    authInfo.pbNonce    = nonce_out;
+    authInfo.cbNonce    = AES_GCM_NONCE_BYTES;
+    authInfo.pbAuthData = (PUCHAR)header;
+    authInfo.cbAuthData = sizeof(PacketHeader);
+    authInfo.pbTag      = tag_out;
+    authInfo.cbTag      = AES_GCM_TAG_BYTES;
+
+    ULONG cbResult = 0;
+    NTSTATUS status;
+
+    EnterCriticalSection(&g_crypto.cs);
+    status = BCryptEncrypt(g_crypto.hKey,
+                           (PUCHAR)plaintext,
+                           plaintext_len,
+                           &authInfo,
+                           NULL,
+                           0,
+                           (PUCHAR)ciphertext_out,
+                           plaintext_len,
+                           &cbResult,
+                           0);
+    LeaveCriticalSection(&g_crypto.cs);
+
+    return BCRYPT_SUCCESS(status);
+}
+
+// Decrypts ciphertext in-place or into out_buf, verifying header AAD and auth tag
+static bool crypto_decrypt_payload(const PacketHeader *header,
+                                   const uint8_t *ciphertext,
+                                   uint32_t ciphertext_len,
+                                   const uint8_t *nonce,
+                                   const uint8_t *tag,
+                                   uint8_t *plaintext_out) {
+    if (!g_crypto.initialized || !header || !ciphertext || !plaintext_out) return false;
+
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+    authInfo.pbNonce    = (PUCHAR)nonce;
+    authInfo.cbNonce    = AES_GCM_NONCE_BYTES;
+    authInfo.pbAuthData = (PUCHAR)header;
+    authInfo.cbAuthData = sizeof(PacketHeader);
+    authInfo.pbTag      = (PUCHAR)tag;
+    authInfo.cbTag      = AES_GCM_TAG_BYTES;
+
+    ULONG cbResult = 0;
+    NTSTATUS status;
+
+    EnterCriticalSection(&g_crypto.cs);
+    status = BCryptDecrypt(g_crypto.hKey,
+                           (PUCHAR)ciphertext,
+                           ciphertext_len,
+                           &authInfo,
+                           NULL,
+                           0,
+                           (PUCHAR)plaintext_out,
+                           ciphertext_len,
+                           &cbResult,
+                           0);
+    LeaveCriticalSection(&g_crypto.cs);
+
+    return BCRYPT_SUCCESS(status);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// LOW-LATENCY RING BUFFER (PHASE 3)
+////////////////////////////////////////////////////////////////////////////////
+#define RING_BUFFER_SLOTS       16  // 16 slots * 10ms = 160ms max jitter window
+#define TARGET_LATENCY_SLOTS    1   // 1 slot = 10ms optimal floor for ultra-low latency
+#define MAX_LATENCY_SLOTS       6   // Max 6 slots (60ms) before catch-up triggers
+
+typedef struct RingBufferSlot {
+    uint8_t  pcm_data[VOICE_FRAME_BYTES];
+    uint32_t sequence;
+    bool     occupied;
+} RingBufferSlot;
+
+typedef struct AudioRingBuffer {
+    RingBufferSlot slots[RING_BUFFER_SLOTS];
+    uint32_t       read_seq;
+    uint32_t       write_seq;
+    int            occupied_count;
+    bool           buffering;       // Wait for initial pre-buffer on stream start
+    CRITICAL_SECTION cs;
+} AudioRingBuffer;
+
+static AudioRingBuffer g_ring_buf;
+
+static void ring_buffer_init(void) {
+    memset(&g_ring_buf, 0, sizeof(g_ring_buf));
+    InitializeCriticalSection(&g_ring_buf.cs);
+    g_ring_buf.buffering = true;
+}
+
+static void ring_buffer_push(uint32_t seq, const uint8_t *pcm, uint32_t len) {
+    if (!pcm || len == 0) return;
+    if (len > VOICE_FRAME_BYTES) len = VOICE_FRAME_BYTES;
+
+    EnterCriticalSection(&g_ring_buf.cs);
+
+    // Initial stream synchronization
+    if (g_ring_buf.buffering) {
+        g_ring_buf.read_seq = seq;
+        g_ring_buf.buffering = false;
+    }
+
+    // Drop ancient packets that are already past our read window
+    if (seq < g_ring_buf.read_seq && (g_ring_buf.read_seq - seq) < 0x80000000) {
+        LeaveCriticalSection(&g_ring_buf.cs);
+        return;
+    }
+
+    int slot_idx = seq % RING_BUFFER_SLOTS;
+    RingBufferSlot *slot = &g_ring_buf.slots[slot_idx];
+
+    if (!slot->occupied) {
+        g_ring_buf.occupied_count++;
+    }
+
+    memcpy(slot->pcm_data, pcm, len);
+    if (len < VOICE_FRAME_BYTES) {
+        memset(slot->pcm_data + len, 0, VOICE_FRAME_BYTES - len);
+    }
+    slot->sequence = seq;
+    slot->occupied = true;
+
+    if (seq > g_ring_buf.write_seq) {
+        g_ring_buf.write_seq = seq;
+    }
+
+    // Low-Latency Catch-up: If network burst causes queue to bloat > MAX_LATENCY_SLOTS,
+    // advance read_seq to maintain our 10ms - 30ms target floor!
+    if (g_ring_buf.occupied_count > MAX_LATENCY_SLOTS) {
+        int excess = g_ring_buf.occupied_count - TARGET_LATENCY_SLOTS;
+        for (int i = 0; i < excess; i++) {
+            int old_slot = g_ring_buf.read_seq % RING_BUFFER_SLOTS;
+            if (g_ring_buf.slots[old_slot].occupied) {
+                g_ring_buf.slots[old_slot].occupied = false;
+                g_ring_buf.occupied_count--;
+            }
+            g_ring_buf.read_seq++;
+        }
+    }
+
+    telemetry_update_buffer_depth(g_ring_buf.occupied_count, (double)VOICE_FRAME_MS);
+    LeaveCriticalSection(&g_ring_buf.cs);
+}
+
+// Pulls 1 frame (10ms) from ring buffer. If underrun, outputs silence and returns false.
+static bool ring_buffer_pop(uint8_t *out_pcm, uint32_t len) {
+    if (!out_pcm || len < VOICE_FRAME_BYTES) return false;
+
+    EnterCriticalSection(&g_ring_buf.cs);
+
+    if (g_ring_buf.buffering || g_ring_buf.occupied_count == 0) {
+        memset(out_pcm, 0, VOICE_FRAME_BYTES);
+        LeaveCriticalSection(&g_ring_buf.cs);
+        return false;
+    }
+
+    int slot_idx = g_ring_buf.read_seq % RING_BUFFER_SLOTS;
+    RingBufferSlot *slot = &g_ring_buf.slots[slot_idx];
+
+    bool got_frame = false;
+    if (slot->occupied && slot->sequence == g_ring_buf.read_seq) {
+        memcpy(out_pcm, slot->pcm_data, VOICE_FRAME_BYTES);
+        slot->occupied = false;
+        g_ring_buf.occupied_count--;
+        g_ring_buf.read_seq++;
+        got_frame = true;
+    } else {
+        // Missing or late packet: Output silence to conceal glitch, advance read_seq
+        memset(out_pcm, 0, VOICE_FRAME_BYTES);
+        g_ring_buf.read_seq++;
+        got_frame = false;
+    }
+
+    telemetry_update_buffer_depth(g_ring_buf.occupied_count, (double)VOICE_FRAME_MS);
+    LeaveCriticalSection(&g_ring_buf.cs);
+    return got_frame;
+}
+
+static void ring_buffer_cleanup(void) {
+    DeleteCriticalSection(&g_ring_buf.cs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// WASAPI AUDIO ENGINE & DEVICE ENUMERATION (PHASE 4)
+////////////////////////////////////////////////////////////////////////////////
+// Static GUID definitions to guarantee 100% self-contained linking with zero SDK lib issues
+static const GUID LOCAL_CLSID_MMDeviceEnumerator = { 0xbcde0395, 0xe52f, 0x467c, { 0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e } };
+static const GUID LOCAL_IID_IMMDeviceEnumerator  = { 0xa95664d2, 0x9614, 0x4f35, { 0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6 } };
+static const GUID LOCAL_IID_IAudioClient         = { 0x1cb9ad4c, 0xdbfa, 0x4c32, { 0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2 } };
+static const GUID LOCAL_IID_IAudioCaptureClient  = { 0xc8adbd64, 0xe71e, 0x48a0, { 0xa4, 0xde, 0x18, 0x5c, 0x39, 0x5c, 0xd3, 0x17 } };
+static const GUID LOCAL_IID_IAudioRenderClient   = { 0xf294acfc, 0x3146, 0x4483, { 0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2 } };
+static const PROPERTYKEY LOCAL_PKEY_Device_FriendlyName = { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
+
+#define MAX_AUDIO_DEVICES 16
+
+typedef struct AudioDeviceInfo {
+    WCHAR id[128];
+    char  name[128];
+    bool  is_default;
+} AudioDeviceInfo;
+
+typedef struct AudioDeviceList {
+    AudioDeviceInfo devices[MAX_AUDIO_DEVICES];
+    int             count;
+    int             default_index;
+} AudioDeviceList;
+
+typedef struct AudioEngine {
+    IMMDeviceEnumerator *pEnumerator;
+    IMMDevice           *pCaptureDevice;
+    IMMDevice           *pRenderDevice;
+    IAudioClient        *pCaptureAudioClient;
+    IAudioClient        *pRenderAudioClient;
+    IAudioCaptureClient *pCaptureClient;
+    IAudioRenderClient  *pRenderClient;
+
+    HANDLE              hCaptureEvent;
+    HANDLE              hRenderEvent;
+    HANDLE              hCaptureThread;
+    HANDLE              hRenderThread;
+
+    UINT32              capture_buffer_frames;
+    UINT32              render_buffer_frames;
+    WAVEFORMATEX        wfx;
+
+    bool                is_running;
+    bool                loopback_test_mode;
+    uint32_t            capture_seq;
+
+    AudioDeviceList     capture_devices;
+    AudioDeviceList     render_devices;
+} AudioEngine;
+
+static AudioEngine g_audio;
+
+static void audio_enumerate_devices(EDataFlow dataFlow, AudioDeviceList *list) {
+    if (!list || !g_audio.pEnumerator) return;
+    memset(list, 0, sizeof(AudioDeviceList));
+    list->default_index = -1;
+
+    IMMDevice *pDefaultDevice = NULL;
+    LPWSTR pDefaultId = NULL;
+    if (SUCCEEDED(g_audio.pEnumerator->lpVtbl->GetDefaultAudioEndpoint(g_audio.pEnumerator, dataFlow, eConsole, &pDefaultDevice))) {
+        pDefaultDevice->lpVtbl->GetId(pDefaultDevice, &pDefaultId);
+    }
+
+    IMMDeviceCollection *pCollection = NULL;
+    HRESULT hr = g_audio.pEnumerator->lpVtbl->EnumAudioEndpoints(g_audio.pEnumerator, dataFlow, DEVICE_STATE_ACTIVE, &pCollection);
+    if (FAILED(hr) || !pCollection) {
+        if (pDefaultDevice) pDefaultDevice->lpVtbl->Release(pDefaultDevice);
+        return;
+    }
+
+    UINT count = 0;
+    pCollection->lpVtbl->GetCount(pCollection, &count);
+    if (count > MAX_AUDIO_DEVICES) count = MAX_AUDIO_DEVICES;
+
+    for (UINT i = 0; i < count; i++) {
+        IMMDevice *pDevice = NULL;
+        if (SUCCEEDED(pCollection->lpVtbl->Item(pCollection, i, &pDevice))) {
+            LPWSTR pId = NULL;
+            pDevice->lpVtbl->GetId(pDevice, &pId);
+            if (pId) {
+                wcsncpy_s(list->devices[list->count].id, 128, pId, _TRUNCATE);
+                if (pDefaultId && wcscmp(pId, pDefaultId) == 0) {
+                    list->devices[list->count].is_default = true;
+                    list->default_index = list->count;
+                }
+                CoTaskMemFree(pId);
+            }
+
+            IPropertyStore *pProps = NULL;
+            if (SUCCEEDED(pDevice->lpVtbl->OpenPropertyStore(pDevice, STGM_READ, &pProps))) {
+                PROPVARIANT varName;
+                PropVariantInit(&varName);
+                if (SUCCEEDED(pProps->lpVtbl->GetValue(pProps, &LOCAL_PKEY_Device_FriendlyName, &varName))) {
+                    if (varName.vt == VT_LPWSTR && varName.pwszVal) {
+                        WideCharToMultiByte(CP_UTF8, 0, varName.pwszVal, -1, list->devices[list->count].name, 128, NULL, NULL);
+                    }
+                    PropVariantClear(&varName);
+                }
+                pProps->lpVtbl->Release(pProps);
+            }
+
+            if (strlen(list->devices[list->count].name) == 0) {
+                snprintf(list->devices[list->count].name, 128, "Audio Device %u", i + 1);
+            }
+
+            list->count++;
+            pDevice->lpVtbl->Release(pDevice);
+        }
+    }
+
+    pCollection->lpVtbl->Release(pCollection);
+    if (pDefaultId) CoTaskMemFree(pDefaultId);
+    if (pDefaultDevice) pDefaultDevice->lpVtbl->Release(pDefaultDevice);
+
+    if (list->default_index == -1 && list->count > 0) {
+        list->default_index = 0;
+        list->devices[0].is_default = true;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// WINSOCK2 UDP NETWORK ENGINE & RELAY SERVER (PHASE 5)
+////////////////////////////////////////////////////////////////////////////////
+#define DEFAULT_RELAY_PORT      7777
+#define MAX_RELAY_CLIENTS       32
+#define CLIENT_TIMEOUT_US       10000000 // 10 seconds timeout for inactive peers
+
+#pragma pack(push, 1)
+typedef struct WirePacket {
+    PacketHeader header;
+    uint8_t      nonce[AES_GCM_NONCE_BYTES];
+    uint8_t      tag[AES_GCM_TAG_BYTES];
+    uint8_t      ciphertext[VOICE_FRAME_BYTES];
+} WirePacket;
+#pragma pack(pop)
+
+// Relay Server State
+typedef struct RelayClient {
+    struct sockaddr_in addr;
+    uint16_t           room_id;
+    uint64_t           last_active_us;
+    bool               active;
+} RelayClient;
+
+typedef struct RelayServer {
+    SOCKET             sock;
+    int                port;
+    bool               is_running;
+    HANDLE             hThread;
+    RelayClient        clients[MAX_RELAY_CLIENTS];
+    CRITICAL_SECTION   cs;
+} RelayServer;
+
+static RelayServer g_relay;
+
+// Client Network State
+typedef struct NetworkClient {
+    SOCKET             sock;
+    struct sockaddr_in server_addr;
+    uint16_t           room_id;
+    bool               is_connected;
+    HANDLE             hRecvThread;
+    CRITICAL_SECTION   cs;
+} NetworkClient;
+
+static NetworkClient g_net_client;
+
+// --- Relay Server Implementation ---
+static DWORD WINAPI relay_server_thread(LPVOID param) {
+    (void)param;
+    WirePacket packet;
+    struct sockaddr_in from_addr;
+    int from_len = sizeof(from_addr);
+
+    while (g_relay.is_running) {
+        int bytes = recvfrom(g_relay.sock, (char*)&packet, sizeof(packet), 0, (struct sockaddr*)&from_addr, &from_len);
+        if (bytes <= 0 || !g_relay.is_running) continue;
+
+        if (bytes < (int)sizeof(PacketHeader) || packet.header.magic != PACKET_MAGIC) {
+            continue; // Ignore non-voicechat packets
+        }
+
+        uint64_t now_us = telemetry_now_us();
+        uint16_t room_id = packet.header.room_id;
+
+        EnterCriticalSection(&g_relay.cs);
+
+        // Update or register sender in client table
+        int sender_idx = -1;
+        int free_idx = -1;
+        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
+            if (g_relay.clients[i].active) {
+                // Timeout prune
+                if (now_us - g_relay.clients[i].last_active_us > CLIENT_TIMEOUT_US) {
+                    g_relay.clients[i].active = false;
+                    continue;
+                }
+                if (g_relay.clients[i].addr.sin_addr.s_addr == from_addr.sin_addr.s_addr &&
+                    g_relay.clients[i].addr.sin_port == from_addr.sin_port) {
+                    sender_idx = i;
+                    g_relay.clients[i].last_active_us = now_us;
+                    g_relay.clients[i].room_id = room_id;
+                }
+            } else if (free_idx == -1) {
+                free_idx = i;
+            }
+        }
+
+        if (sender_idx == -1 && free_idx != -1) {
+            sender_idx = free_idx;
+            g_relay.clients[free_idx].active = true;
+            g_relay.clients[free_idx].addr = from_addr;
+            g_relay.clients[free_idx].room_id = room_id;
+            g_relay.clients[free_idx].last_active_us = now_us;
+        }
+
+        // Forward packet to all other peers in the SAME room
+        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
+            if (g_relay.clients[i].active &&
+                g_relay.clients[i].room_id == room_id &&
+                i != sender_idx) {
+                sendto(g_relay.sock,
+                       (const char*)&packet,
+                       bytes,
+                       0,
+                       (struct sockaddr*)&g_relay.clients[i].addr,
+                       sizeof(struct sockaddr_in));
+            }
+        }
+
+        LeaveCriticalSection(&g_relay.cs);
+    }
+    return 0;
+}
+
+static bool relay_server_start(int port) {
+    memset(&g_relay, 0, sizeof(g_relay));
+    InitializeCriticalSection(&g_relay.cs);
+    g_relay.port = port;
+
+    g_relay.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_relay.sock == INVALID_SOCKET) return false;
+
+    // Enable socket reuse
+    int opt = 1;
+    setsockopt(g_relay.sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons((u_short)port);
+    bind_addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(g_relay.sock, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) == SOCKET_ERROR) {
+        closesocket(g_relay.sock);
+        return false;
+    }
+
+    g_relay.is_running = true;
+    g_relay.hThread = CreateThread(NULL, 0, relay_server_thread, NULL, 0, NULL);
+    return true;
+}
+
+static void relay_server_stop(void) {
+    if (!g_relay.is_running) return;
+    g_relay.is_running = false;
+    if (g_relay.sock != INVALID_SOCKET) {
+        closesocket(g_relay.sock);
+        g_relay.sock = INVALID_SOCKET;
+    }
+    if (g_relay.hThread) {
+        WaitForSingleObject(g_relay.hThread, 1000);
+        CloseHandle(g_relay.hThread);
+        g_relay.hThread = NULL;
+    }
+    DeleteCriticalSection(&g_relay.cs);
+}
+
+// --- Client Network Implementation ---
+static DWORD WINAPI network_client_recv_thread(LPVOID param) {
+    (void)param;
+    WirePacket packet;
+    struct sockaddr_in from_addr;
+    int from_len = sizeof(from_addr);
+    uint8_t decrypted_pcm[VOICE_FRAME_BYTES];
+
+    while (g_net_client.is_connected) {
+        int bytes = recvfrom(g_net_client.sock,
+                             (char*)&packet,
+                             sizeof(packet),
+                             0,
+                             (struct sockaddr*)&from_addr,
+                             &from_len);
+        if (bytes <= 0 || !g_net_client.is_connected) continue;
+
+        if (bytes < (int)sizeof(WirePacket) || packet.header.magic != PACKET_MAGIC) {
+            continue;
+        }
+
+        // Measure crypto decryption overhead
+        uint64_t t0 = telemetry_now_us();
+        bool dec_ok = crypto_decrypt_payload(&packet.header,
+                                             packet.ciphertext,
+                                             VOICE_FRAME_BYTES,
+                                             packet.nonce,
+                                             packet.tag,
+                                             decrypted_pcm);
+        uint64_t t1 = telemetry_now_us();
+        telemetry_record_crypto_overhead((double)(t1 - t0));
+
+        if (!dec_ok) {
+            // Tampered, corrupted, or incorrect key
+            continue;
+        }
+
+        // Record incoming telemetry metrics
+        telemetry_record_recv(bytes, packet.header.sequence, packet.header.timestamp_us);
+
+        // Push decrypted voice frame into ultra-low latency ring buffer
+        ring_buffer_push(packet.header.sequence, decrypted_pcm, VOICE_FRAME_BYTES);
+    }
+    return 0;
+}
+
+static bool network_client_connect(const char *server_ip, int server_port, uint16_t room_id) {
+    memset(&g_net_client, 0, sizeof(g_net_client));
+    InitializeCriticalSection(&g_net_client.cs);
+
+    g_net_client.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_net_client.sock == INVALID_SOCKET) return false;
+
+    // Set receive timeout so thread loop can check is_connected flag
+    DWORD timeout_ms = 100;
+    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
+
+    memset(&g_net_client.server_addr, 0, sizeof(g_net_client.server_addr));
+    g_net_client.server_addr.sin_family = AF_INET;
+    g_net_client.server_addr.sin_port = htons((u_short)server_port);
+    inet_pton(AF_INET, server_ip, &g_net_client.server_addr.sin_addr);
+
+    g_net_client.room_id = room_id;
+    g_net_client.is_connected = true;
+
+    g_net_client.hRecvThread = CreateThread(NULL, 0, network_client_recv_thread, NULL, 0, NULL);
+    return true;
+}
+
+static void network_client_disconnect(void) {
+    if (!g_net_client.is_connected) return;
+    g_net_client.is_connected = false;
+    if (g_net_client.sock != INVALID_SOCKET) {
+        closesocket(g_net_client.sock);
+        g_net_client.sock = INVALID_SOCKET;
+    }
+    if (g_net_client.hRecvThread) {
+        WaitForSingleObject(g_net_client.hRecvThread, 1000);
+        CloseHandle(g_net_client.hRecvThread);
+        g_net_client.hRecvThread = NULL;
+    }
+    DeleteCriticalSection(&g_net_client.cs);
+}
+
+// Hook called by WASAPI capture thread to transmit encrypted audio frames
+static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t bytes) {
+    if (!g_net_client.is_connected || !pcm || bytes == 0) return;
+
+    WirePacket packet;
+    packet.header.magic = PACKET_MAGIC;
+    packet.header.sequence = seq;
+    packet.header.timestamp_us = telemetry_now_us();
+    packet.header.payload_bytes = (uint16_t)bytes;
+    packet.header.room_id = g_net_client.room_id;
+
+    uint64_t t0 = telemetry_now_us();
+    bool enc_ok = crypto_encrypt_payload(&packet.header,
+                                         pcm,
+                                         bytes,
+                                         packet.ciphertext,
+                                         packet.nonce,
+                                         packet.tag);
+    uint64_t t1 = telemetry_now_us();
+    telemetry_record_crypto_overhead((double)(t1 - t0));
+
+    if (!enc_ok) return;
+
+    int sent = sendto(g_net_client.sock,
+                      (const char*)&packet,
+                      sizeof(WirePacket),
+                      0,
+                      (struct sockaddr*)&g_net_client.server_addr,
+                      sizeof(g_net_client.server_addr));
+
+    if (sent > 0) {
+        telemetry_record_send((size_t)sent);
+    }
+}
+
+
+static DWORD WINAPI wasapi_capture_thread(LPVOID param) {
+    (void)param;
+    DWORD taskIndex = 0;
+    HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+
+    BYTE temp_frame[VOICE_FRAME_BYTES];
+    UINT32 accumulated_bytes = 0;
+
+    while (g_audio.is_running) {
+        DWORD waitResult = WaitForSingleObject(g_audio.hCaptureEvent, 50);
+        if (!g_audio.is_running) break;
+        if (waitResult != WAIT_OBJECT_0) continue;
+
+        UINT32 packetLength = 0;
+        HRESULT hr = g_audio.pCaptureClient->lpVtbl->GetNextPacketSize(g_audio.pCaptureClient, &packetLength);
+        while (SUCCEEDED(hr) && packetLength > 0) {
+            BYTE *pData = NULL;
+            UINT32 numFramesRead = 0;
+            DWORD flags = 0;
+
+            hr = g_audio.pCaptureClient->lpVtbl->GetBuffer(g_audio.pCaptureClient, &pData, &numFramesRead, &flags, NULL, NULL);
+            if (SUCCEEDED(hr) && pData) {
+                UINT32 bytesAvailable = numFramesRead * g_audio.wfx.nBlockAlign;
+
+                // If silent flag set, treat buffer as zeroes
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                    pData = NULL;
+                }
+
+                // Chunk incoming samples into exact 10ms (320 bytes) voice frames
+                UINT32 src_offset = 0;
+                while (src_offset < bytesAvailable) {
+                    UINT32 needed = VOICE_FRAME_BYTES - accumulated_bytes;
+                    UINT32 to_copy = (bytesAvailable - src_offset < needed) ? (bytesAvailable - src_offset) : needed;
+
+                    if (pData) {
+                        memcpy(temp_frame + accumulated_bytes, pData + src_offset, to_copy);
+                    } else {
+                        memset(temp_frame + accumulated_bytes, 0, to_copy);
+                    }
+
+                    accumulated_bytes += to_copy;
+                    src_offset += to_copy;
+
+                    if (accumulated_bytes >= VOICE_FRAME_BYTES) {
+                        uint32_t seq = g_audio.capture_seq++;
+                        if (g_audio.loopback_test_mode) {
+                            // Direct loopback into local ring buffer for testing
+                            ring_buffer_push(seq, temp_frame, VOICE_FRAME_BYTES);
+                        } else {
+                            // Transmit frame over UDP network
+                            network_send_audio_frame(seq, temp_frame, VOICE_FRAME_BYTES);
+                        }
+                        accumulated_bytes = 0;
+                    }
+                }
+
+                g_audio.pCaptureClient->lpVtbl->ReleaseBuffer(g_audio.pCaptureClient, numFramesRead);
+            }
+            hr = g_audio.pCaptureClient->lpVtbl->GetNextPacketSize(g_audio.pCaptureClient, &packetLength);
+        }
+    }
+
+    if (hTask) AvRevertMmThreadCharacteristics(hTask);
+    return 0;
+}
+
+static DWORD WINAPI wasapi_render_thread(LPVOID param) {
+    (void)param;
+    DWORD taskIndex = 0;
+    HANDLE hTask = AvSetMmThreadCharacteristicsA("Pro Audio", &taskIndex);
+
+    BYTE pcm_frame[VOICE_FRAME_BYTES];
+
+    while (g_audio.is_running) {
+        DWORD waitResult = WaitForSingleObject(g_audio.hRenderEvent, 50);
+        if (!g_audio.is_running) break;
+        if (waitResult != WAIT_OBJECT_0) continue;
+
+        UINT32 padding = 0;
+        HRESULT hr = g_audio.pRenderAudioClient->lpVtbl->GetCurrentPadding(g_audio.pRenderAudioClient, &padding);
+        if (FAILED(hr)) continue;
+
+        UINT32 framesAvailable = g_audio.render_buffer_frames - padding;
+        while (framesAvailable >= VOICE_SAMPLES_PER_FRAME) {
+            BYTE *pRenderData = NULL;
+            hr = g_audio.pRenderClient->lpVtbl->GetBuffer(g_audio.pRenderClient, VOICE_SAMPLES_PER_FRAME, &pRenderData);
+            if (SUCCEEDED(hr) && pRenderData) {
+                // Pull 10ms frame from ring buffer (outputs silence automatically if underrun)
+                ring_buffer_pop(pcm_frame, VOICE_FRAME_BYTES);
+                memcpy(pRenderData, pcm_frame, VOICE_FRAME_BYTES);
+                g_audio.pRenderClient->lpVtbl->ReleaseBuffer(g_audio.pRenderClient, VOICE_SAMPLES_PER_FRAME, 0);
+            }
+            framesAvailable -= VOICE_SAMPLES_PER_FRAME;
+        }
+    }
+
+    if (hTask) AvRevertMmThreadCharacteristics(hTask);
+    return 0;
+}
+
+static bool audio_engine_init(void) {
+    memset(&g_audio, 0, sizeof(g_audio));
+
+    // Initialize 16 kHz 16-bit Mono PCM format descriptor
+    g_audio.wfx.wFormatTag      = WAVE_FORMAT_PCM;
+    g_audio.wfx.nChannels       = VOICE_CHANNELS;
+    g_audio.wfx.nSamplesPerSec  = VOICE_SAMPLE_RATE;
+    g_audio.wfx.wBitsPerSample  = VOICE_BITS_PER_SAMPLE;
+    g_audio.wfx.nBlockAlign     = (g_audio.wfx.nChannels * g_audio.wfx.wBitsPerSample) / 8;
+    g_audio.wfx.nAvgBytesPerSec = g_audio.wfx.nSamplesPerSec * g_audio.wfx.nBlockAlign;
+    g_audio.wfx.cbSize          = 0;
+
+    HRESULT hr = CoCreateInstance(&LOCAL_CLSID_MMDeviceEnumerator,
+                                  NULL,
+                                  CLSCTX_ALL,
+                                  &LOCAL_IID_IMMDeviceEnumerator,
+                                  (void**)&g_audio.pEnumerator);
+    if (FAILED(hr) || !g_audio.pEnumerator) {
+        return false;
+    }
+
+    // Enumerate active microphone and speaker endpoints
+    audio_enumerate_devices(eCapture, &g_audio.capture_devices);
+    audio_enumerate_devices(eRender, &g_audio.render_devices);
+
+    return true;
+}
+
+static bool audio_engine_start(int capture_dev_idx, int render_dev_idx, bool loopback_mode) {
+    if (!g_audio.pEnumerator) return false;
+    g_audio.loopback_test_mode = loopback_mode;
+    g_audio.capture_seq = 0;
+
+    HRESULT hr;
+
+    // 1. Activate Capture Device
+    if (capture_dev_idx >= 0 && capture_dev_idx < g_audio.capture_devices.count) {
+        hr = g_audio.pEnumerator->lpVtbl->GetDevice(g_audio.pEnumerator, g_audio.capture_devices.devices[capture_dev_idx].id, &g_audio.pCaptureDevice);
+    } else {
+        hr = g_audio.pEnumerator->lpVtbl->GetDefaultAudioEndpoint(g_audio.pEnumerator, eCapture, eConsole, &g_audio.pCaptureDevice);
+    }
+    if (FAILED(hr) || !g_audio.pCaptureDevice) return false;
+
+    hr = g_audio.pCaptureDevice->lpVtbl->Activate(g_audio.pCaptureDevice, &LOCAL_IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&g_audio.pCaptureAudioClient);
+    if (FAILED(hr) || !g_audio.pCaptureAudioClient) return false;
+
+    // 10ms buffer duration in 100ns units = 10 * 10000 = 100000
+    REFERENCE_TIME hnsRequested = 200000; // 20ms buffer cushion
+    DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+    hr = g_audio.pCaptureAudioClient->lpVtbl->Initialize(g_audio.pCaptureAudioClient,
+                                                         AUDCLNT_SHAREMODE_SHARED,
+                                                         streamFlags,
+                                                         hnsRequested,
+                                                         0,
+                                                         &g_audio.wfx,
+                                                         NULL);
+    if (FAILED(hr)) return false;
+
+    g_audio.hCaptureEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    hr = g_audio.pCaptureAudioClient->lpVtbl->SetEventHandle(g_audio.pCaptureAudioClient, g_audio.hCaptureEvent);
+    if (FAILED(hr)) return false;
+
+    hr = g_audio.pCaptureAudioClient->lpVtbl->GetService(g_audio.pCaptureAudioClient, &LOCAL_IID_IAudioCaptureClient, (void**)&g_audio.pCaptureClient);
+    if (FAILED(hr) || !g_audio.pCaptureClient) return false;
+
+    g_audio.pCaptureAudioClient->lpVtbl->GetBufferSize(g_audio.pCaptureAudioClient, &g_audio.capture_buffer_frames);
+
+    // 2. Activate Render Device
+    if (render_dev_idx >= 0 && render_dev_idx < g_audio.render_devices.count) {
+        hr = g_audio.pEnumerator->lpVtbl->GetDevice(g_audio.pEnumerator, g_audio.render_devices.devices[render_dev_idx].id, &g_audio.pRenderDevice);
+    } else {
+        hr = g_audio.pEnumerator->lpVtbl->GetDefaultAudioEndpoint(g_audio.pEnumerator, eRender, eConsole, &g_audio.pRenderDevice);
+    }
+    if (FAILED(hr) || !g_audio.pRenderDevice) return false;
+
+    hr = g_audio.pRenderDevice->lpVtbl->Activate(g_audio.pRenderDevice, &LOCAL_IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&g_audio.pRenderAudioClient);
+    if (FAILED(hr) || !g_audio.pRenderAudioClient) return false;
+
+    hr = g_audio.pRenderAudioClient->lpVtbl->Initialize(g_audio.pRenderAudioClient,
+                                                       AUDCLNT_SHAREMODE_SHARED,
+                                                       streamFlags,
+                                                       hnsRequested,
+                                                       0,
+                                                       &g_audio.wfx,
+                                                       NULL);
+    if (FAILED(hr)) return false;
+
+    g_audio.hRenderEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    hr = g_audio.pRenderAudioClient->lpVtbl->SetEventHandle(g_audio.pRenderAudioClient, g_audio.hRenderEvent);
+    if (FAILED(hr)) return false;
+
+    hr = g_audio.pRenderAudioClient->lpVtbl->GetService(g_audio.pRenderAudioClient, &LOCAL_IID_IAudioRenderClient, (void**)&g_audio.pRenderClient);
+    if (FAILED(hr) || !g_audio.pRenderClient) return false;
+
+    g_audio.pRenderAudioClient->lpVtbl->GetBufferSize(g_audio.pRenderAudioClient, &g_audio.render_buffer_frames);
+
+    // 3. Start audio streams and spawn worker threads
+    g_audio.is_running = true;
+
+    g_audio.pCaptureAudioClient->lpVtbl->Start(g_audio.pCaptureAudioClient);
+    g_audio.pRenderAudioClient->lpVtbl->Start(g_audio.pRenderAudioClient);
+
+    g_audio.hCaptureThread = CreateThread(NULL, 0, wasapi_capture_thread, NULL, 0, NULL);
+    g_audio.hRenderThread  = CreateThread(NULL, 0, wasapi_render_thread, NULL, 0, NULL);
+
+    return true;
+}
+
+static void audio_engine_stop(void) {
+    if (!g_audio.is_running) return;
+    g_audio.is_running = false;
+
+    if (g_audio.hCaptureEvent) SetEvent(g_audio.hCaptureEvent);
+    if (g_audio.hRenderEvent)  SetEvent(g_audio.hRenderEvent);
+
+    if (g_audio.hCaptureThread) {
+        WaitForSingleObject(g_audio.hCaptureThread, 1000);
+        CloseHandle(g_audio.hCaptureThread);
+        g_audio.hCaptureThread = NULL;
+    }
+    if (g_audio.hRenderThread) {
+        WaitForSingleObject(g_audio.hRenderThread, 1000);
+        CloseHandle(g_audio.hRenderThread);
+        g_audio.hRenderThread = NULL;
+    }
+
+    if (g_audio.pCaptureAudioClient) g_audio.pCaptureAudioClient->lpVtbl->Stop(g_audio.pCaptureAudioClient);
+    if (g_audio.pRenderAudioClient)  g_audio.pRenderAudioClient->lpVtbl->Stop(g_audio.pRenderAudioClient);
+
+    if (g_audio.pCaptureClient) { g_audio.pCaptureClient->lpVtbl->Release(g_audio.pCaptureClient); g_audio.pCaptureClient = NULL; }
+    if (g_audio.pRenderClient)  { g_audio.pRenderClient->lpVtbl->Release(g_audio.pRenderClient); g_audio.pRenderClient = NULL; }
+    if (g_audio.pCaptureAudioClient) { g_audio.pCaptureAudioClient->lpVtbl->Release(g_audio.pCaptureAudioClient); g_audio.pCaptureAudioClient = NULL; }
+    if (g_audio.pRenderAudioClient)  { g_audio.pRenderAudioClient->lpVtbl->Release(g_audio.pRenderAudioClient); g_audio.pRenderAudioClient = NULL; }
+    if (g_audio.pCaptureDevice) { g_audio.pCaptureDevice->lpVtbl->Release(g_audio.pCaptureDevice); g_audio.pCaptureDevice = NULL; }
+    if (g_audio.pRenderDevice)  { g_audio.pRenderDevice->lpVtbl->Release(g_audio.pRenderDevice); g_audio.pRenderDevice = NULL; }
+
+    if (g_audio.hCaptureEvent) { CloseHandle(g_audio.hCaptureEvent); g_audio.hCaptureEvent = NULL; }
+    if (g_audio.hRenderEvent)  { CloseHandle(g_audio.hRenderEvent); g_audio.hRenderEvent = NULL; }
+}
+
+static void audio_engine_cleanup(void) {
+    audio_engine_stop();
+    if (g_audio.pEnumerator) {
+        g_audio.pEnumerator->lpVtbl->Release(g_audio.pEnumerator);
+        g_audio.pEnumerator = NULL;
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// WIN32 GUI & TELEMETRY HUD (PHASE 6)
+////////////////////////////////////////////////////////////////////////////////
+#define IDT_TELEMETRY_TIMER     101
+
+#define IDC_EDIT_IP             201
+#define IDC_EDIT_PORT           202
+#define IDC_EDIT_ROOM           203
+#define IDC_EDIT_KEY            204
+#define IDC_CHK_HOST            205
+#define IDC_COMBO_MIC           206
+#define IDC_COMBO_SPK           207
+#define IDC_BTN_CONNECT         208
+#define IDC_BTN_DISCONNECT      209
+#define IDC_CHK_HUD             210
+#define IDC_EDIT_HUD            211
+#define IDC_STATIC_STATUS       212
+
+typedef struct GuiControls {
+    HWND hwndMain;
+    HWND hEditIp;
+    HWND hEditPort;
+    HWND hEditRoom;
+    HWND hEditKey;
+    HWND hChkHost;
+    HWND hComboMic;
+    HWND hComboSpk;
+    HWND hBtnConnect;
+    HWND hBtnDisconnect;
+    HWND hChkHud;
+    HWND hEditHud;
+    HWND hStaticStatus;
+    HFONT hFontUi;
+    HFONT hFontMono;
+    bool  is_in_call;
+} GuiControls;
+
+static GuiControls g_gui;
+
+static void gui_update_status(const char *text) {
+    if (g_gui.hStaticStatus) {
+        SetWindowTextA(g_gui.hStaticStatus, text);
+    }
+}
+
+static void gui_update_hud(void) {
+    if (!g_gui.hEditHud || !IsWindow(g_gui.hEditHud)) return;
+
+    telemetry_update_bandwidth();
+
+    TelemetryState snap;
+    telemetry_get_snapshot(&snap);
+
+    char hud_text[1024];
+    snprintf(hud_text, sizeof(hud_text),
+        "================== LIVE TELEMETRY HUD ==================\r\n"
+        " Audio Engine:    WASAPI 16 kHz 16-bit Mono (Uncompressed PCM)\r\n"
+        " Encryption:      Windows Native BCrypt AES-GCM (Hardware AES-NI)\r\n"
+        " -------------------------------------------------------\r\n"
+        " Bandwidth OUT:   %6.2f KB/s   | Bandwidth IN:    %6.2f KB/s\r\n"
+        " Round-Trip Time: %6.2f ms     | Jitter (RFC3550):%6.2f ms\r\n"
+        " Packets Sent:    %6llu        | Packets Recv:    %6llu\r\n"
+        " Packet Loss:     %6.2f %%      | Out-of-Order:    %6llu\r\n"
+        " Ring Buffer:     %2d slot (%4.1f ms) [Target Floor: 10-15 ms]\r\n"
+        " AES Crypto Time: %6.2f us / frame\r\n"
+        "========================================================\r\n",
+        snap.kb_per_sec_out, snap.kb_per_sec_in,
+        snap.last_rtt_ms, snap.jitter_ms,
+        (unsigned long long)snap.total_packets_sent, (unsigned long long)snap.total_packets_recv,
+        snap.packet_loss_pct, (unsigned long long)snap.out_of_order_count,
+        snap.current_buffer_frames, snap.current_buffer_ms,
+        snap.crypto_overhead_us);
+
+    SetWindowTextA(g_gui.hEditHud, hud_text);
+}
+
+static void gui_handle_connect(void) {
+    char ip[64] = {0};
+    char port_str[16] = {0};
+    char room_str[16] = {0};
+    char key[128] = {0};
+
+    GetWindowTextA(g_gui.hEditIp, ip, sizeof(ip));
+    GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
+    GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
+    GetWindowTextA(g_gui.hEditKey, key, sizeof(key));
+
+    int port = atoi(port_str);
+    if (port <= 0 || port > 65535) port = DEFAULT_RELAY_PORT;
+
+    uint16_t room_id = (uint16_t)atoi(room_str);
+    if (room_id == 0) room_id = 1;
+
+    if (strlen(ip) == 0) strcpy_s(ip, sizeof(ip), "127.0.0.1");
+    if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
+
+    bool host_relay = (SendMessage(g_gui.hChkHost, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    // 1. If hosting relay server, start it
+    if (host_relay) {
+        if (!relay_server_start(port)) {
+            MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on specified port!", "Error", MB_ICONERROR);
+            return;
+        }
+    }
+
+    // 2. Initialize crypto with pre-shared key
+    if (!crypto_init(key)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to initialize Windows AES-GCM cryptography!", "Error", MB_ICONERROR);
+        if (host_relay) relay_server_stop();
+        return;
+    }
+
+    // 3. Connect UDP network client
+    if (!network_client_connect(ip, port, room_id)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to connect UDP client!", "Error", MB_ICONERROR);
+        crypto_cleanup();
+        if (host_relay) relay_server_stop();
+        return;
+    }
+
+    // 4. Start WASAPI Audio Engine with selected devices
+    int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
+    int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
+
+    if (!audio_engine_start(mic_idx, spk_idx, false)) {
+        MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
+        network_client_disconnect();
+        crypto_cleanup();
+        if (host_relay) relay_server_stop();
+        return;
+    }
+
+    g_gui.is_in_call = true;
+    EnableWindow(g_gui.hBtnConnect, FALSE);
+    EnableWindow(g_gui.hBtnDisconnect, TRUE);
+    EnableWindow(g_gui.hChkHost, FALSE);
+    EnableWindow(g_gui.hEditIp, FALSE);
+    EnableWindow(g_gui.hEditPort, FALSE);
+    EnableWindow(g_gui.hEditRoom, FALSE);
+    EnableWindow(g_gui.hEditKey, FALSE);
+
+    char status_buf[128];
+    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d %s",
+             room_id, ip, port, host_relay ? "(Hosting Relay)" : "");
+    gui_update_status(status_buf);
+}
+
+static void gui_handle_disconnect(void) {
+    if (!g_gui.is_in_call) return;
+
+    audio_engine_stop();
+    network_client_disconnect();
+    relay_server_stop();
+    crypto_cleanup();
+
+    g_gui.is_in_call = false;
+    EnableWindow(g_gui.hBtnConnect, TRUE);
+    EnableWindow(g_gui.hBtnDisconnect, FALSE);
+    EnableWindow(g_gui.hChkHost, TRUE);
+    EnableWindow(g_gui.hEditIp, TRUE);
+    EnableWindow(g_gui.hEditPort, TRUE);
+    EnableWindow(g_gui.hEditRoom, TRUE);
+    EnableWindow(g_gui.hEditKey, TRUE);
+
+    gui_update_status("Disconnected. Ready to connect.");
+}
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            g_gui.hwndMain = hwnd;
+
+            // System font for crisp Win32 controls
+            g_gui.hFontUi = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            g_gui.hFontMono = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                          ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                          DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+
+            // Group 1: Connection & Room Settings
+            CreateWindowA("BUTTON", " Connection & Room Settings ",
+                          WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                          15, 10, 515, 140, hwnd, NULL, NULL, NULL);
+
+            CreateWindowA("STATIC", "Relay IP:", WS_CHILD | WS_VISIBLE, 30, 35, 60, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditIp = CreateWindowA("EDIT", "127.0.0.1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                          95, 33, 140, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
+
+            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 250, 35, 40, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditPort = CreateWindowA("EDIT", "7777", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                                            295, 33, 60, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
+
+            g_gui.hChkHost = CreateWindowA("BUTTON", "Host Relay Server on this PC",
+                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                           370, 35, 150, 20, hwnd, (HMENU)IDC_CHK_HOST, NULL, NULL);
+
+            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 30, 68, 60, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditRoom = CreateWindowA("EDIT", "1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                                            95, 66, 60, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
+
+            CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 175, 68, 70, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hEditKey = CreateWindowA("EDIT", "voicechat2026", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
+                                           250, 66, 260, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
+
+            // Group 2: Audio Devices
+            CreateWindowA("BUTTON", " Audio Hardware (WASAPI Event-Driven) ",
+                          WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                          15, 155, 515, 95, hwnd, NULL, NULL, NULL);
+
+            CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 30, 180, 80, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hComboMic = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                            115, 177, 395, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
+
+            CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 30, 215, 80, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hComboSpk = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                            115, 212, 395, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+
+            // Populate Audio Device Dropdowns
+            for (int i = 0; i < g_audio.capture_devices.count; i++) {
+                SendMessageA(g_gui.hComboMic, CB_ADDSTRING, 0, (LPARAM)g_audio.capture_devices.devices[i].name);
+            }
+            if (g_audio.capture_devices.default_index >= 0) {
+                SendMessage(g_gui.hComboMic, CB_SETCURSEL, (WPARAM)g_audio.capture_devices.default_index, 0);
+            }
+
+            for (int i = 0; i < g_audio.render_devices.count; i++) {
+                SendMessageA(g_gui.hComboSpk, CB_ADDSTRING, 0, (LPARAM)g_audio.render_devices.devices[i].name);
+            }
+            if (g_audio.render_devices.default_index >= 0) {
+                SendMessage(g_gui.hComboSpk, CB_SETCURSEL, (WPARAM)g_audio.render_devices.default_index, 0);
+            }
+
+            // Action Buttons
+            g_gui.hBtnConnect = CreateWindowA("BUTTON", "Connect / Join Room",
+                                              WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                              15, 260, 180, 32, hwnd, (HMENU)IDC_BTN_CONNECT, NULL, NULL);
+
+            g_gui.hBtnDisconnect = CreateWindowA("BUTTON", "Disconnect",
+                                                 WS_CHILD | WS_VISIBLE | WS_DISABLED,
+                                                 205, 260, 140, 32, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
+
+            g_gui.hChkHud = CreateWindowA("BUTTON", "Show Live Telemetry HUD",
+                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                          360, 266, 170, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
+            SendMessage(g_gui.hChkHud, BM_SETCHECK, BST_CHECKED, 0);
+
+            // Live Telemetry Readout Box
+            g_gui.hEditHud = CreateWindowA("EDIT", "",
+                                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+                                           15, 302, 515, 175, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
+            SendMessage(g_gui.hEditHud, WM_SETFONT, (WPARAM)g_gui.hFontMono, TRUE);
+
+            // Status Bar Label
+            g_gui.hStaticStatus = CreateWindowA("STATIC", "Ready to connect.",
+                                                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                                15, 485, 515, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+
+            // Apply system fonts to all controls
+            HWND child = GetWindow(hwnd, GW_CHILD);
+            while (child) {
+                if (child != g_gui.hEditHud) {
+                    SendMessage(child, WM_SETFONT, (WPARAM)g_gui.hFontUi, TRUE);
+                }
+                child = GetWindow(child, GW_HWNDNEXT);
+            }
+
+            // Start 250ms periodic timer for Live Telemetry HUD updates
+            SetTimer(hwnd, IDT_TELEMETRY_TIMER, 250, NULL);
+            break;
+        }
+
+        case WM_TIMER: {
+            if (wParam == IDT_TELEMETRY_TIMER) {
+                bool show_hud = (SendMessage(g_gui.hChkHud, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                ShowWindow(g_gui.hEditHud, show_hud ? SW_SHOW : SW_HIDE);
+                if (show_hud) {
+                    gui_update_hud();
+                }
+            }
+            break;
+        }
+
+        case WM_COMMAND: {
+            WORD id = LOWORD(wParam);
+            if (id == IDC_BTN_CONNECT) {
+                gui_handle_connect();
+            } else if (id == IDC_BTN_DISCONNECT) {
+                gui_handle_disconnect();
+            }
+            break;
+        }
+
+        case WM_DESTROY: {
+            gui_handle_disconnect();
+            KillTimer(hwnd, IDT_TELEMETRY_TIMER);
+            if (g_gui.hFontMono) DeleteObject(g_gui.hFontMono);
+            PostQuitMessage(0);
+            break;
+        }
+
+        default:
+            return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// MAIN ENTRY POINT
+////////////////////////////////////////////////////////////////////////////////
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+
+    // 1. Initialize COM and Winsock
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+
+    // 2. Initialize Telemetry, Ring Buffer, and Audio Engine
+    telemetry_init();
+    ring_buffer_init();
+    audio_engine_init();
+
+    // 3. Register Win32 Window Class
+    WNDCLASSEXA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize        = sizeof(WNDCLASSEXA);
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInstance;
+    wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "preAlphaVoiceChatClass";
+
+    RegisterClassExA(&wc);
+
+    // 4. Create and Show Main Window
+    HWND hwnd = CreateWindowExA(WS_EX_APPWINDOW,
+                                "preAlphaVoiceChatClass",
+                                "preAlphaVoiceChat - Win32 Low-Latency Voice Client",
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                CW_USEDEFAULT, CW_USEDEFAULT,
+                                560, 550,
+                                NULL, NULL, hInstance, NULL);
+
+    if (!hwnd) {
+        MessageBoxA(NULL, "Failed to create application window!", "Fatal Error", MB_ICONERROR);
+        return 1;
+    }
+
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    // 5. Standard Win32 Message Loop
+    MSG msg;
+    while (GetMessageA(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+
+    // 6. Cleanup
+    audio_engine_cleanup();
+    ring_buffer_cleanup();
+    WSACleanup();
+    CoUninitialize();
+
+    return (int)msg.wParam;
+}
+
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOWNORMAL);
+}
