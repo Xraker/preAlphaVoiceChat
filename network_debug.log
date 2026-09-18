@@ -1,239 +1,88 @@
-[14:13:15.792] [SYSTEM      ] ==========================================================
-[14:13:15.792] [SYSTEM      ]  preAlphaVoiceChat Network Diagnostics Engine ACTIVE
-[14:13:15.792] [SYSTEM      ]  Master toggle 'ENABLE_VERBOSE_NET_LOG': 1 (Verbose)
-[14:13:15.792] [SYSTEM      ]  Mirroring all events to 'network_debug.log'
-[14:13:15.792] [SYSTEM      ] ==========================================================
-[14:13:34.878] [GUI         ] HOST ROOM clicked: LAN=192.168.1.4, Port=7777, Room=1, Key='voicechat2026', Token=1FDF9838
-[14:13:34.878] [UPNP        ] Attempting UPnP NAT port mapping for LAN: 192.168.1.4:7777 (UDP)...
-[14:13:35.006] [UPNP        ] SUCCESS: Port 7777 UDP mapped on router! External port 7777 -> 192.168.1.4:7777
-[14:13:35.006] [HOST-RELAY  ] Starting Relay Server on local port 7777...
-[14:13:35.006] [HOST-RELAY  ] Relay UDP socket bound to 0.0.0.0:7777 successfully.
-[14:13:35.006] [STUN        ] Resolving public reflexive endpoint via Google STUN pool...
-[14:13:35.037] [STUN        ] Success via stun.l.google.com:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:35.037] [HOST-RELAY  ] STUN mapped endpoint for relay socket: 24.133.73.13:18686
-[14:13:35.037] [HOST-RELAY  ] UPnP is ACTIVE: Host external port locked to 7777
-[14:13:35.037] [HOST-RELAY  ] Host signaling thread launched for session token: 1FDF9838
-[14:13:35.038] [RELAY-RECV  ] Relay server listener thread ACTIVE on socket fd=2188
-[14:13:35.038] [HOST-PUNCH  ] Thread started. Session token: 1FDF9838
-[14:13:35.038] [HOST-PUNCH  ] Signaling topics: JOIN='vchat/1FDF9838/join', PEER='vchat/1FDF9838/peer', HOST='vchat/1FDF9838/host'
-[14:13:35.038] [HOST-PUNCH  ] Host announcement payload: 'HOST:24.133.73.13:7777:192.168.1.4:7777'
-[14:13:35.038] [HOST-PUNCH  ] Connecting to MQTT signaling broker (client_id: vch_9f729422_0029)...
-[14:13:35.038] [MQTT        ] Attempting primary broker EMQX (broker.emqx.io:1883)...
-[14:13:35.038] [GUI         ] Invite code generated: '24.133.73.13+192.168.1.4:7777#1#voicechat2026#1FDF9838'
-[14:13:35.038] [CLIENT      ] network_client_connect: Target WAN=127.0.0.1:7777, LAN=none, Room=1, Token=none
-[14:13:35.038] [CLIENT      ] Client UDP socket bound to local port 58778
-[14:13:35.038] [STUN        ] Resolving public reflexive endpoint via Google STUN pool...
-[14:13:35.067] [STUN        ] Success via stun.l.google.com:19302 -> Public Endpoint: 24.133.73.13:18684
-[14:13:35.067] [CLIENT      ] STUN discovered public endpoint: 24.133.73.13:18684
-[14:13:35.067] [CLIENT      ] Client Session ID: 0x9F73087F | Room ID: 1
-[14:13:35.067] [CLIENT      ] Beginning UDP probe loop (35 attempts, 350ms timeout each)...
-[14:13:35.067] [CLIENT-PROBE] Probe #1/35 sent -> Target WAN: 127.0.0.1:7777 (and :7777)
-[14:13:35.068] [RELAY-RECV  ] <<< INCOMING JOIN_REQ from 127.0.0.1:58778 | Room: 1 | SenderID: 0x9F73087F
-[14:13:35.068] [RELAY-SRV   ] Registered client in slot #0: 127.0.0.1:58778 (Room: 1)
-[14:13:35.068] [RELAY-JOIN  ] >>> Sent burst of 5 JOIN_ACK replies to 127.0.0.1:58778 (5/5 succeeded, Host SenderID: 0x00000001)
-[14:13:35.068] [RELAY-RECV  ] <<< INCOMING JOIN_REQ from 127.0.0.1:58778 | Room: 1 | SenderID: 0x9F73087F
-[14:13:35.069] [RELAY-JOIN  ] >>> Sent burst of 5 JOIN_ACK replies to 127.0.0.1:58778 (5/5 succeeded, Host SenderID: 0x00000001)
-[14:13:35.069] [CLIENT-PROBE] RECV 28 bytes from 127.0.0.1:7777 (magic=0x56434854, type=2)
-[14:13:35.069] [CLIENT      ] *** HANDSHAKE SUCCESS! Connected to 127.0.0.1:7777 (Peer count: 1, Host SenderID: 0x00000001) ***
-[14:13:35.069] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:58778 | Room: 1 | SenderID: 0x9F73087F
-[14:13:35.069] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:58778 | Room: 1 | SenderID: 0x9F73087F
-[14:13:35.070] [CLIENT      ] Client receive thread started. Ready for audio transmission.
-[14:13:35.070] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:58778 | Room: 1 | SenderID: 0x9F73087F
-[14:13:35.117] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #1, 376 bytes)
-[14:13:35.399] [MQTT        ] Connected to MQTT broker broker.emqx.io:1883 (Client ID: vch_9f729422_0029)
-[14:13:35.399] [HOST-PUNCH  ] Connected to signaling broker: broker.emqx.io:1883
-[14:13:35.529] [MQTT        ] SUBSCRIBE [vchat/1FDF9838/join] -> SUCCESS (SUBACK byte0=0x90)
-[14:13:35.659] [MQTT        ] SUBSCRIBE [vchat/1FDF9838/peer] -> SUCCESS (SUBACK byte0=0x90)
-[14:13:35.659] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=1, status=OK): 'HOST:24.133.73.13:7777:192.168.1.4:7777'
-[14:13:35.724] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
-[14:13:35.751] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:38.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #300, 376 bytes)
-[14:13:38.781] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:40.739] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
-[14:13:40.879] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:40.879] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:40.879] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:40.880] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:40.881] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:41.089] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:41.089] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:41.090] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:41.090] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:41.090] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:41.091] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:41.091] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:41.091] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:41.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #600, 376 bytes)
-[14:13:41.155] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:41.464] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:41.776] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:41.803] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:41.990] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:41.990] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:41.990] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:41.991] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:42.055] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:42.131] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:42.131] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:42.132] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:42.132] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:42.318] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:42.626] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:42.935] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:43.117] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:43.117] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:43.118] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:43.118] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:43.247] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:43.271] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:43.271] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:43.271] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:43.271] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:43.510] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:43.821] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:44.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #900, 376 bytes)
-[14:13:44.132] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:44.199] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:44.199] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:44.199] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:44.199] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:44.371] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:44.371] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:44.372] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:44.372] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:44.428] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:44.738] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:44.826] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:45.048] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:45.322] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:45.322] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:45.323] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:45.323] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:45.324] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:45.459] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:45.459] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:45.460] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:45.460] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:45.576] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:45.763] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 27 | Peer: 176.237.58.223
-[14:13:45.888] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:46.199] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:46.423] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:46.424] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:46.424] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:46.424] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:46.477] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:46.578] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:46.578] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:46.578] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:46.579] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:46.757] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:47.066] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:47.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #1200, 376 bytes)
-[14:13:47.316] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:47.517] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:47.517] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:47.518] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:47.518] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:47.582] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:47.657] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:47.657] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:47.658] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:47.658] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:47.846] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:47.874] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:48.157] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:48.470] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:48.615] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:48.615] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:48.616] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:48.616] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:48.736] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:48.766] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:48.766] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:48.766] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:48.766] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:49.015] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:49.325] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:49.636] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:49.755] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:49.755] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:49.756] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:49.756] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:49.880] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:49.880] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:49.881] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:49.881] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:49.946] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:50.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #1500, 376 bytes)
-[14:13:50.257] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:50.568] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:50.806] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 44 | Peer: 176.237.58.223
-[14:13:50.806] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:50.808] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:50.808] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:50.808] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:50.861] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:50.889] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:50.996] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:50.996] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:50.997] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:50.997] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:51.172] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:51.481] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:51.791] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:51.925] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:51.926] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:51.926] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:51.927] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:52.042] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:52.068] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:52.068] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:52.068] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:52.068] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:52.306] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:52.618] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:52.929] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:53.036] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/join]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:53.036] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:53.037] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:53.037] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:53.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #1800, 376 bytes)
-[14:13:53.205] [HOST-PUNCH  ] RECV MQTT msg on [vchat/1FDF9838/peer]: 'JOIN:176.237.58.223:55518:172.20.10.3:54827'
-[14:13:53.205] [HOST-PUNCH  ] Peer endpoints parsed -> Public: 176.237.58.223:55518 | LAN: 172.20.10.3:54827
-[14:13:53.206] [HOST-PUNCH  ] Triggering 20-second active hole punching pulse (4 Hz) to peer...
-[14:13:53.206] [MQTT        ] PUBLISH [vchat/1FDF9838/host] (retain=0, status=OK): 'PUNCHING:24.133.73.13:7777'
-[14:13:53.206] [HOST-PUNCH  ] Pulse #1: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:53.458] [HOST-PUNCH  ] Pulse #2: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:53.770] [HOST-PUNCH  ] Pulse #3: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:53.922] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:54.081] [HOST-PUNCH  ] Pulse #4: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:54.392] [HOST-PUNCH  ] Pulse #5: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:55.634] [HOST-PUNCH  ] Pulse #9: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:55.820] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 61 | Peer: 176.237.58.223
-[14:13:56.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #2100, 376 bytes)
-[14:13:56.878] [HOST-PUNCH  ] Pulse #13: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:56.967] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:13:58.123] [HOST-PUNCH  ] Pulse #17: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:13:59.106] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #2400, 376 bytes)
-[14:13:59.306] [HOST-PUNCH  ] Pulse #21: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:00.013] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:14:00.543] [HOST-PUNCH  ] Pulse #25: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:00.852] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 77 | Peer: 176.237.58.223
-[14:14:01.783] [HOST-PUNCH  ] Pulse #29: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:02.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #2700, 376 bytes)
-[14:14:02.963] [HOST-PUNCH  ] Pulse #33: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:03.052] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:14:04.207] [HOST-PUNCH  ] Pulse #37: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:05.107] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:58778 (pkt #3000, 376 bytes)
-[14:14:05.452] [HOST-PUNCH  ] Pulse #41: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:05.884] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:7777 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 94 | Peer: 176.237.58.223
-[14:14:06.097] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:18686
-[14:14:06.687] [HOST-PUNCH  ] Pulse #45: Outbound punch to announced peer 176.237.58.223:55518 (sendto res=28)
-[14:14:07.688] [UPNP        ] Removing UPnP port mapping for port 7777 (UDP)...
-[14:14:07.699] [UPNP        ] UPnP port mapping for port 7777 removed cleanly.
-[14:14:07.699] [HOST-RELAY  ] Stopping Relay Server and cleaning up threads/sockets...
-[14:14:07.700] [HOST-PUNCH  ] Host signaling thread terminated.
-[14:14:07.700] [RELAY-RECV  ] Relay server listener thread stopped.
-[14:14:07.700] [HOST-RELAY  ] Relay Server stopped cleanly.
-[14:14:13.290] [SYSTEM      ] Diagnostics session terminated cleanly.
+[01:59:24.921] [SYSTEM      ] ==========================================================
+[01:59:24.921] [SYSTEM      ]  preAlphaVoiceChat Network Diagnostics Engine ACTIVE
+[01:59:24.921] [SYSTEM      ]  Master toggle 'ENABLE_VERBOSE_NET_LOG': 1 (Verbose)
+[01:59:24.921] [SYSTEM      ]  Recording all events to 'network_debug.log'
+[01:59:24.921] [SYSTEM      ] ==========================================================
+[01:59:57.706] [GUI         ] HOST ROOM clicked: LAN=192.168.1.4, Port=7777, Room=1, Key='voicechat2026', Token=E2B73B8A
+[01:59:57.706] [UPNP        ] Attempting UPnP NAT port mapping for LAN: 192.168.1.4:7777 (UDP)...
+[01:59:57.843] [UPNP        ] SUCCESS: Port 7777 UDP mapped on router! External port 7777 -> 192.168.1.4:7777
+[01:59:57.844] [HOST-RELAY  ] Starting Relay Server on local port 7777...
+[01:59:57.844] [HOST-RELAY  ] Relay UDP socket bound to 0.0.0.0:7777 successfully.
+[01:59:57.844] [STUN        ] Resolving public reflexive endpoint via Google STUN pool...
+[01:59:57.876] [STUN        ] Success via stun.l.google.com:19302 -> Public Endpoint: 24.133.73.13:19454
+[01:59:57.876] [HOST-RELAY  ] STUN mapped endpoint for relay socket: 24.133.73.13:19454
+[01:59:57.876] [HOST-RELAY  ] Host external port set from STUN reflexive mapping: 19454 (UPnP status: Active)
+[01:59:57.876] [HOST-RELAY  ] Host signaling thread launched for session token: E2B73B8A
+[01:59:57.876] [GUI         ] Invite code generated: '24.133.73.13+192.168.1.4:19454#1#voicechat2026#E2B73B8A'
+[01:59:57.876] [RELAY-RECV  ] Relay server listener thread ACTIVE on socket fd=2260
+[01:59:57.876] [HOST-PUNCH  ] Thread started. Session token: E2B73B8A
+[01:59:57.876] [HOST-PUNCH  ] Signaling topics: JOIN='vchat/E2B73B8A/join', PEER='vchat/E2B73B8A/peer', HOST='vchat/E2B73B8A/host'
+[01:59:57.876] [HOST-PUNCH  ] Host announcement payload: 'HOST:24.133.73.13:19454:192.168.1.4:7777'
+[01:59:57.876] [HOST-PUNCH  ] Connecting to MQTT signaling broker (client_id: vch_7db45e21_0029)...
+[01:59:57.876] [MQTT        ] Attempting primary broker EMQX (broker.emqx.io:1883)...
+[01:59:57.876] [CLIENT      ] network_client_connect: Target WAN=127.0.0.1:7777, LAN=none, Room=1, Token=none
+[01:59:57.876] [CLIENT      ] Client UDP socket bound to local port 53335
+[01:59:57.876] [STUN        ] Resolving public reflexive endpoint via Google STUN pool...
+[01:59:57.904] [STUN        ] Success via stun.l.google.com:19302 -> Public Endpoint: 24.133.73.13:19452
+[01:59:57.904] [CLIENT      ] STUN discovered public endpoint: 24.133.73.13:19452
+[01:59:57.904] [CLIENT      ] Client Session ID: 0x7DB4C82D | Room ID: 1
+[01:59:57.904] [CLIENT      ] Beginning UDP probe loop (35 attempts, 350ms timeout each)...
+[01:59:57.905] [CLIENT-PROBE] Probe #1/35 sent -> Target WAN: 127.0.0.1:7777 (and :7777)
+[01:59:57.905] [RELAY-RECV  ] <<< INCOMING JOIN_REQ from 127.0.0.1:53335 | Room: 1 | SenderID: 0x7DB4C82D
+[01:59:57.905] [RELAY-SRV   ] Registered client in slot #0: 127.0.0.1:53335 (Room: 1)
+[01:59:57.905] [RELAY-JOIN  ] >>> Sent burst of 5 JOIN_ACK replies to 127.0.0.1:53335 (5/5 succeeded, Host SenderID: 0x00000001)
+[01:59:57.905] [RELAY-RECV  ] <<< INCOMING JOIN_REQ from 127.0.0.1:53335 | Room: 1 | SenderID: 0x7DB4C82D
+[01:59:57.905] [RELAY-JOIN  ] >>> Sent burst of 5 JOIN_ACK replies to 127.0.0.1:53335 (5/5 succeeded, Host SenderID: 0x00000001)
+[01:59:57.905] [CLIENT-PROBE] RECV 28 bytes from 127.0.0.1:7777 (magic=0x56434854, type=2)
+[01:59:57.905] [CLIENT      ] *** HANDSHAKE SUCCESS! Connected to 127.0.0.1:7777 (Peer count: 1, Host SenderID: 0x00000001) ***
+[01:59:57.905] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:53335 | Room: 1 | SenderID: 0x7DB4C82D
+[01:59:57.905] [CLIENT      ] Client receive thread started. Ready for audio transmission.
+[01:59:57.905] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:53335 | Room: 1 | SenderID: 0x7DB4C82D
+[01:59:57.905] [RELAY-RECV  ] <<< INCOMING JOIN_ACK from 127.0.0.1:53335 | Room: 1 | SenderID: 0x7DB4C82D
+[01:59:57.926] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #1, 376 bytes)
+[01:59:58.752] [MQTT        ] Connected to MQTT broker broker.emqx.io:1883 (Client ID: vch_7db45e21_0029)
+[01:59:58.752] [HOST-PUNCH  ] Connected to signaling broker: broker.emqx.io:1883
+[01:59:59.112] [MQTT        ] SUBSCRIBE [vchat/E2B73B8A/join] -> SUCCESS (SUBACK byte0=0x90)
+[01:59:59.482] [MQTT        ] SUBSCRIBE [vchat/E2B73B8A/peer] -> SUCCESS (SUBACK byte0=0x90)
+[01:59:59.482] [MQTT        ] PUBLISH [vchat/E2B73B8A/host] (retain=1, status=OK): 'HOST:24.133.73.13:19454:192.168.1.4:7777'
+[01:59:59.544] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[01:59:59.571] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:00.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #300, 376 bytes)
+[02:00:02.621] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:03.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #600, 376 bytes)
+[02:00:04.581] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:05.672] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:06.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #900, 376 bytes)
+[02:00:08.717] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:09.630] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:09.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #1200, 376 bytes)
+[02:00:11.772] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:12.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #1500, 376 bytes)
+[02:00:14.671] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:14.822] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:15.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #1800, 376 bytes)
+[02:00:17.868] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:18.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #2100, 376 bytes)
+[02:00:19.700] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:20.908] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:21.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #2400, 376 bytes)
+[02:00:23.950] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:24.733] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:24.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #2700, 376 bytes)
+[02:00:27.002] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:27.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #3000, 376 bytes)
+[02:00:29.778] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:30.055] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:30.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #3300, 376 bytes)
+[02:00:33.114] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:33.916] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #3600, 376 bytes)
+[02:00:34.825] [HOST-STATUS ] Relay on 0.0.0.0:7777 | Public: 24.133.73.13:19454 (UPnP: ACTIVE) | MQTT: CONNECTED | Probes Recv: 0 | Replies Sent: 10 | Peer: None
+[02:00:36.158] [STUN-RECV   ] STUN keepalive verified from 74.125.250.129:19302 -> Public Endpoint: 24.133.73.13:19454
+[02:00:36.915] [RELAY-AUDIO ] Audio stream active from 127.0.0.1:53335 (pkt #3900, 376 bytes)
+[02:00:37.000] [UPNP        ] Removing UPnP port mapping for port 19454 (UDP)...
+[02:00:37.012] [UPNP        ] UPnP port mapping for port 19454 removed cleanly.
+[02:00:37.012] [HOST-RELAY  ] Stopping Relay Server and cleaning up threads/sockets...
+[02:00:37.012] [HOST-PUNCH  ] Host signaling thread terminated.
+[02:00:37.012] [RELAY-RECV  ] Relay server listener thread stopped.
+[02:00:37.012] [HOST-RELAY  ] Relay Server stopped cleanly.
+[02:00:37.015] [SYSTEM      ] Diagnostics session terminated cleanly.

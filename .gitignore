@@ -1,0 +1,8 @@
+# Godot project folder
+pre-alpha-voice-chat/
+
+# Godot engine caches and imported assets
+.godot/
+*.pck
+*.uid
+*.import

@@ -176,11 +176,7 @@ static void net_log(const char *tag, const char *fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
 
-    // Print to live console
-    printf("[%s] [%-12s] %s\n", time_str, tag, msg);
-    fflush(stdout);
-
-    // Mirror to network_debug.log file
+    // Output to network_debug.log file
     if (!g_net_log_file) {
         fopen_s(&g_net_log_file, "network_debug.log", "a");
     }
@@ -200,27 +196,11 @@ static void net_log_init(void) {
         g_net_log_cs_init = true;
     }
 
-    // Allocate dedicated Windows console for live diagnostics
-    if (AllocConsole()) {
-        FILE *fDummy = NULL;
-        freopen_s(&fDummy, "CONOUT$", "w", stdout);
-        freopen_s(&fDummy, "CONOUT$", "w", stderr);
-        freopen_s(&fDummy, "CONIN$", "r", stdin);
-        SetConsoleTitleA("preAlphaVoiceChat - Live Network & Traversal Diagnostics");
-        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (hOut != INVALID_HANDLE_VALUE) {
-            DWORD dwMode = 0;
-            if (GetConsoleMode(hOut, &dwMode)) {
-                SetConsoleMode(hOut, dwMode | 0x0004);
-            }
-        }
-    }
-
     fopen_s(&g_net_log_file, "network_debug.log", "w");
     net_log("SYSTEM", "==========================================================");
     net_log("SYSTEM", " preAlphaVoiceChat Network Diagnostics Engine ACTIVE");
     net_log("SYSTEM", " Master toggle 'ENABLE_VERBOSE_NET_LOG': 1 (Verbose)");
-    net_log("SYSTEM", " Mirroring all events to 'network_debug.log'");
+    net_log("SYSTEM", " Recording all events to 'network_debug.log'");
     net_log("SYSTEM", "==========================================================");
 }
 
