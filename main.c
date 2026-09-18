@@ -1479,8 +1479,8 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             }
         }
 
-        // Active continuous hole punching while punch_until_us is active or confirmed peer exists (pulsed every 25ms)
-        if ((has_peer || g_relay.has_confirmed_peer) && (now_us - last_punch_pulse_us >= 25000)) {
+        // Active hole punching while punch_until_us is active or confirmed peer exists (paced at 250ms, 4 Hz)
+        if ((has_peer || g_relay.has_confirmed_peer) && (now_us - last_punch_pulse_us >= 250000)) {
             last_punch_pulse_us = now_us;
             WirePacket punch;
             memset(&punch, 0, sizeof(punch));
@@ -1494,28 +1494,22 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             if (g_relay.has_confirmed_peer) {
                 sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
                        (struct sockaddr*)&g_relay.confirmed_peer_addr, sizeof(g_relay.confirmed_peer_addr));
-            }
-
-            struct sockaddr_in target_pub, target_lan;
-            memset(&target_pub, 0, sizeof(target_pub));
-            memset(&target_lan, 0, sizeof(target_lan));
-
-            if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0 && now_us < punch_until_us) {
+                g_relay.total_replies_sent++;
+            } else if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0 && now_us < punch_until_us) {
+                // If peer announced on MQTT but no packet received yet, send direct punch packet to announced endpoint
+                struct sockaddr_in target_pub;
+                memset(&target_pub, 0, sizeof(target_pub));
                 target_pub.sin_family = AF_INET;
+                target_pub.sin_port = htons((u_short)peer_pub_port);
                 inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
-
-                // Burst across target_port - 10 to target_port + 40 (covers mobile/CGNAT port shifts!)
-                for (int p_off = -10; p_off <= 40; p_off++) {
-                    int p_test = peer_pub_port + p_off;
-                    if (p_test > 0 && p_test <= 65535) {
-                        target_pub.sin_port = htons((u_short)p_test);
-                        sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                               (struct sockaddr*)&target_pub, sizeof(target_pub));
-                    }
-                }
+                sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                       (struct sockaddr*)&target_pub, sizeof(target_pub));
+                g_relay.total_replies_sent++;
             }
 
             if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0 && now_us < punch_until_us && strcmp(peer_lan_ip, "127.0.0.1") != 0) {
+                struct sockaddr_in target_lan;
+                memset(&target_lan, 0, sizeof(target_lan));
                 target_lan.sin_family = AF_INET;
                 target_lan.sin_port = htons((u_short)peer_lan_port);
                 inet_pton(AF_INET, peer_lan_ip, &target_lan.sin_addr);
@@ -1577,6 +1571,9 @@ static bool relay_server_start(int port, const char *token, bool upnp_active) {
     } else {
         g_relay.public_port = g_relay.stun_port;
     }
+    // Reset receive timeout to 100ms so relay_server_thread responds promptly
+    DWORD server_rcvto = 100;
+    setsockopt(g_relay.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&server_rcvto, sizeof(server_rcvto));
 
     g_relay.is_running = true;
     g_relay.hThread = CreateThread(NULL, 0, relay_server_thread, NULL, 0, NULL);
@@ -1763,8 +1760,8 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
         }
     }
 
-    // Set receive timeout for probing (100ms per probe attempt)
-    DWORD timeout_ms = 100;
+    // Set receive timeout for probing (350ms to accommodate mobile cellular latency)
+    DWORD timeout_ms = 350;
     setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
 
     // Assign randomized unique sender ID for this client session
@@ -1820,9 +1817,8 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     int resp_len = sizeof(responder_addr);
     WirePacket ack;
 
-    // Probe loop: send JOIN_REQ with adjacent port bursting (-5 to +5), wait for JOIN_ACK
-    // 100 attempts * 100ms = 10.0 seconds maximum
-    for (int attempt = 0; attempt < 100 && !handshake_ok; attempt++) {
+    // Probe loop: 35 attempts * 350ms = ~12 seconds maximum
+    for (int attempt = 0; attempt < 35 && !handshake_ok; attempt++) {
         g_join_diag.probes_sent++;
 
         // Check if Host announced its endpoint or acknowledged on MQTT
@@ -1856,8 +1852,8 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                 }
             }
 
-            // Re-publish announcement every 10 attempts (~1 sec) to ensure delivery
-            if ((attempt % 10 == 0) && session_token && strlen(session_token) > 0) {
+            // Re-publish announcement every 3 attempts (~1 sec) to ensure delivery
+            if ((attempt % 3 == 0) && session_token && strlen(session_token) > 0) {
                 char payload[128];
                 snprintf(payload, sizeof(payload), "JOIN:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
                 mqtt_publish(join_mqtt, join_topic, payload, false);
@@ -1870,15 +1866,11 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
         }
 
-        // Probing WAN with adjacent port bursting (port - 5 to port + 5)
+        // Probing WAN: direct probe to server_port without triggering port scan filters
         if (has_wan) {
-            for (int p_off = -5; p_off <= 5; p_off++) {
-                int p_test = server_port + p_off;
-                if (p_test > 0 && p_test <= 65535) {
-                    wan_addr.sin_port = htons((u_short)p_test);
-                    sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
-                }
-            }
+            wan_addr.sin_port = htons((u_short)server_port);
+            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
+
             // Dual-candidate probe: Also probe default port (7777) in case host is on UPnP / port forwarded
             if (server_port != DEFAULT_RELAY_PORT) {
                 wan_addr.sin_port = htons((u_short)DEFAULT_RELAY_PORT);
@@ -1891,16 +1883,16 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&loop_addr, sizeof(loop_addr));
         }
 
-        // Resilient receive loop: wait up to 120ms per attempt and ignore ICMP port unreachables
+        // Resilient receive loop: wait up to 350ms per attempt to accommodate mobile cellular latency
         uint64_t probe_start_us = telemetry_now_us();
-        while (telemetry_now_us() - probe_start_us < 120000) {
+        while (telemetry_now_us() - probe_start_us < 350000) {
             resp_len = sizeof(responder_addr);
             int bytes = recvfrom(g_net_client.sock, (char*)&ack, sizeof(ack), 0, (struct sockaddr*)&responder_addr, &resp_len);
             if (bytes <= 0) {
                 int err = WSAGetLastError();
                 if (err == WSAECONNRESET || err == WSAEWOULDBLOCK) {
-                    Sleep(2);
-                    continue; // Transient ICMP unreachable from wrong port burst, keep waiting!
+                    Sleep(5);
+                    continue;
                 }
                 break; // True timeout (WSAETIMEDOUT)
             }
@@ -1917,7 +1909,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                     network_client_record_peer(ack.header.sender_id, telemetry_now_us());
                 }
 
-                // Send burst of 5 confirmation ACKs to host so host's NAT pinhole locks instantly
+                // Send burst of 3 confirmation ACKs to host so host's NAT pinhole locks instantly
                 WirePacket reply;
                 memset(&reply, 0, sizeof(reply));
                 reply.header.magic = PACKET_MAGIC;
@@ -1925,7 +1917,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                 reply.header.room_id = room_id;
                 reply.header.sender_id = g_net_client.my_sender_id;
                 reply.header.timestamp_us = telemetry_now_us();
-                for (int b = 0; b < 5; b++) {
+                for (int b = 0; b < 3; b++) {
                     sendto(g_net_client.sock, (const char*)&reply, sizeof(PacketHeader), 0,
                            (struct sockaddr*)&responder_addr, sizeof(responder_addr));
                 }
