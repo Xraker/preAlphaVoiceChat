@@ -695,6 +695,7 @@ typedef struct AudioEngine {
     bool                is_running;
     bool                loopback_test_mode;
     uint32_t            capture_seq;
+    int                 playback_volume;
 
     AudioDeviceList     capture_devices;
     AudioDeviceList     render_devices;
@@ -1326,7 +1327,17 @@ static DWORD WINAPI wasapi_render_thread(LPVOID param) {
             hr = g_audio.pRenderClient->lpVtbl->GetBuffer(g_audio.pRenderClient, VOICE_SAMPLES_PER_FRAME, &pRenderData);
             if (SUCCEEDED(hr) && pRenderData) {
                 // Pull 10ms frame from ring buffer (outputs silence automatically if underrun)
-                ring_buffer_pop(pcm_frame, VOICE_FRAME_BYTES);
+                bool got_frame = ring_buffer_pop(pcm_frame, VOICE_FRAME_BYTES);
+                if (got_frame && g_audio.playback_volume != 100) {
+                    float vol = (float)g_audio.playback_volume / 100.0f;
+                    int16_t *s = (int16_t*)pcm_frame;
+                    for (int i = 0; i < VOICE_SAMPLES_PER_FRAME; i++) {
+                        int32_t val = (int32_t)(s[i] * vol);
+                        if (val > 32767) val = 32767;
+                        else if (val < -32768) val = -32768;
+                        s[i] = (int16_t)val;
+                    }
+                }
                 memcpy(pRenderData, pcm_frame, VOICE_FRAME_BYTES);
                 g_audio.pRenderClient->lpVtbl->ReleaseBuffer(g_audio.pRenderClient, VOICE_SAMPLES_PER_FRAME, 0);
             }
@@ -1340,6 +1351,7 @@ static DWORD WINAPI wasapi_render_thread(LPVOID param) {
 
 static bool audio_engine_init(void) {
     memset(&g_audio, 0, sizeof(g_audio));
+    g_audio.playback_volume = 100;
 
     // Initialize 16 kHz 16-bit Mono PCM format descriptor
     g_audio.wfx.wFormatTag      = WAVE_FORMAT_PCM;
@@ -1510,6 +1522,8 @@ static void audio_engine_cleanup(void) {
 #define IDC_EDIT_HUD            214
 #define IDC_STATIC_STATUS       215
 #define IDC_BTN_TEST_MIC        216
+#define IDC_SLIDER_PEER_VOL     217
+#define IDC_BTN_DARK_MODE       218
 
 typedef struct GuiControls {
     HWND hwndMain;
@@ -1529,10 +1543,18 @@ typedef struct GuiControls {
     HWND hChkHud;
     HWND hStaticMic;
     HWND hStaticPeers;
+    HWND hStaticParticipant;
+    HWND hSliderPeerVol;
+    HWND hStaticVolVal;
     HWND hEditHud;
+    HWND hBtnDarkMode;
     HWND hStaticStatus;
+    HBRUSH hbrDarkBg;
+    HBRUSH hbrDarkEdit;
     HFONT hFontUi;
     HFONT hFontMono;
+    int   peer_volume;          // 0 to 200%, default 100
+    bool  is_dark_mode;
     bool  is_in_call;
     bool  is_host;
     bool  is_testing_mic;
@@ -1852,6 +1874,36 @@ static void gui_update_hud(void) {
 
     if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, mic_str);
     if (g_gui.hStaticPeers) SetWindowTextA(g_gui.hStaticPeers, peer_str);
+
+    if (g_gui.hStaticParticipant) {
+        if (g_gui.is_testing_mic) {
+            SetWindowTextA(g_gui.hStaticParticipant, "Participant: Self (Mic Loopback Test)");
+        } else if (g_gui.is_in_call) {
+            uint64_t now_us = telemetry_now_us();
+            uint32_t active_id = 0;
+            int count = 0;
+            EnterCriticalSection(&g_net_client.cs);
+            for (int i = 0; i < MAX_ROOM_PEERS; i++) {
+                if (g_net_client.peers[i].sender_id != 0 && (now_us - g_net_client.peers[i].last_seen_us <= 3500000)) {
+                    if (active_id == 0) active_id = g_net_client.peers[i].sender_id;
+                    count++;
+                }
+            }
+            LeaveCriticalSection(&g_net_client.cs);
+
+            char part_buf[64];
+            if (count == 0) {
+                strcpy_s(part_buf, sizeof(part_buf), "Participant: None (Waiting for peer)");
+            } else if (count == 1) {
+                snprintf(part_buf, sizeof(part_buf), "Participant: Peer #%04X (Active)", active_id & 0xFFFF);
+            } else {
+                snprintf(part_buf, sizeof(part_buf), "Participants: %d active peers in room", count);
+            }
+            SetWindowTextA(g_gui.hStaticParticipant, part_buf);
+        } else {
+            SetWindowTextA(g_gui.hStaticParticipant, "Participant: None (Disconnected)");
+        }
+    }
 
     // ASCII volume meter bar (0 to 20 bars)
     char mic_bar[21];
@@ -2257,6 +2309,7 @@ static void gui_handle_disconnect(void) {
 
     if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, "[ ○ MIC: OFF ]");
     if (g_gui.hStaticPeers) SetWindowTextA(g_gui.hStaticPeers, "Room: Disconnected");
+    if (g_gui.hStaticParticipant) SetWindowTextA(g_gui.hStaticParticipant, "Participant: None (Disconnected)");
     gui_update_status("Disconnected. Ready to connect.");
 }
 
@@ -2264,6 +2317,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
         case WM_CREATE: {
             g_gui.hwndMain = hwnd;
+            g_gui.peer_volume = 100;
+            g_gui.is_dark_mode = false;
+            g_gui.hbrDarkBg = CreateSolidBrush(RGB(24, 24, 24));
+            g_gui.hbrDarkEdit = CreateSolidBrush(RGB(38, 38, 38));
 
             // System font for crisp Win32 controls
             g_gui.hFontUi = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -2274,65 +2331,65 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Group 1: Room & Connection Settings
             CreateWindowA("BUTTON", " Room & Connection Setup ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 10, 525, 160, hwnd, NULL, NULL, NULL);
+                          15, 10, 525, 155, hwnd, NULL, NULL, NULL);
 
             // Invite Code row:
-            CreateWindowA("STATIC", "Invite Code:", WS_CHILD | WS_VISIBLE, 25, 32, 75, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Invite Code:", WS_CHILD | WS_VISIBLE, 25, 30, 75, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditInvite = CreateWindowA("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                              105, 30, 240, 22, hwnd, (HMENU)IDC_EDIT_INVITE, NULL, NULL);
+                                              105, 28, 240, 22, hwnd, (HMENU)IDC_EDIT_INVITE, NULL, NULL);
 
             g_gui.hBtnCopyInvite = CreateWindowA("BUTTON", "Copy Invite", WS_CHILD | WS_VISIBLE,
-                                                 355, 29, 85, 24, hwnd, (HMENU)IDC_BTN_COPY_INVITE, NULL, NULL);
+                                                 355, 27, 85, 24, hwnd, (HMENU)IDC_BTN_COPY_INVITE, NULL, NULL);
 
             g_gui.hBtnPasteInvite = CreateWindowA("BUTTON", "Paste Invite", WS_CHILD | WS_VISIBLE,
-                                                  445, 29, 85, 24, hwnd, (HMENU)IDC_BTN_PASTE_INVITE, NULL, NULL);
+                                                  445, 27, 85, 24, hwnd, (HMENU)IDC_BTN_PASTE_INVITE, NULL, NULL);
 
             // Manual Connection Details row:
-            CreateWindowA("STATIC", "Host IP:", WS_CHILD | WS_VISIBLE, 25, 64, 55, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Host IP:", WS_CHILD | WS_VISIBLE, 25, 58, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditIp = CreateWindowA("EDIT", "127.0.0.1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                          80, 62, 130, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
+                                          80, 56, 130, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
 
-            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 220, 64, 35, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 220, 58, 35, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditPort = CreateWindowA("EDIT", "7777", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            255, 62, 50, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
+                                            255, 56, 50, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
 
-            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 315, 64, 55, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 315, 58, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditRoom = CreateWindowA("EDIT", "1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            370, 62, 45, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
+                                            370, 56, 45, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
 
-            CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 25, 94, 70, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 25, 86, 70, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditKey = CreateWindowA("EDIT", "voicechat2026", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                           100, 92, 315, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
+                                           100, 84, 315, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
 
             // Distinct Action Buttons:
             g_gui.hBtnHost = CreateWindowA("BUTTON", "Create && Host Room",
                                            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                           25, 124, 165, 34, hwnd, (HMENU)IDC_BTN_HOST, NULL, NULL);
+                                           25, 116, 165, 34, hwnd, (HMENU)IDC_BTN_HOST, NULL, NULL);
 
             g_gui.hBtnJoin = CreateWindowA("BUTTON", "Join Existing Room",
                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                           200, 124, 165, 34, hwnd, (HMENU)IDC_BTN_JOIN, NULL, NULL);
+                                           200, 116, 165, 34, hwnd, (HMENU)IDC_BTN_JOIN, NULL, NULL);
 
             g_gui.hBtnDisconnect = CreateWindowA("BUTTON", "Disconnect",
                                                  WS_CHILD | WS_VISIBLE | WS_DISABLED,
-                                                 375, 124, 155, 34, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
+                                                 375, 116, 155, 34, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
 
             // Group 2: Audio Hardware
             CreateWindowA("BUTTON", " Audio Hardware (WASAPI Event-Driven) ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 180, 525, 88, hwnd, NULL, NULL, NULL);
+                          15, 172, 525, 84, hwnd, NULL, NULL, NULL);
 
-            CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 25, 204, 80, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 25, 194, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboMic = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 201, 290, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
+                                            110, 191, 290, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
 
-            CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 25, 236, 80, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 25, 224, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboSpk = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 233, 290, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+                                            110, 221, 290, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
 
             g_gui.hBtnTestMic = CreateWindowA("BUTTON", "Test Mic\n(Loopback)",
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_MULTILINE,
-                                              410, 201, 120, 56, hwnd, (HMENU)IDC_BTN_TEST_MIC, NULL, NULL);
+                                              410, 191, 120, 54, hwnd, (HMENU)IDC_BTN_TEST_MIC, NULL, NULL);
 
             // Populate Audio Device Dropdowns
             for (int i = 0; i < g_audio.capture_devices.count; i++) {
@@ -2349,30 +2406,56 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessage(g_gui.hComboSpk, CB_SETCURSEL, (WPARAM)g_audio.render_devices.default_index, 0);
             }
 
+            // Group 3: Participants & Volume Control
+            CreateWindowA("BUTTON", " Participants & Volume Control ",
+                          WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                          15, 262, 525, 60, hwnd, NULL, NULL, NULL);
+
+            g_gui.hStaticParticipant = CreateWindowA("STATIC", "Participant: None (Disconnected)",
+                                                     WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                                     25, 286, 215, 20, hwnd, NULL, NULL, NULL);
+
+            CreateWindowA("STATIC", "Volume:", WS_CHILD | WS_VISIBLE, 245, 286, 50, 20, hwnd, NULL, NULL, NULL);
+
+            g_gui.hSliderPeerVol = CreateWindowA(TRACKBAR_CLASSA, "PeerVolume",
+                                                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
+                                                 295, 282, 160, 28, hwnd, (HMENU)IDC_SLIDER_PEER_VOL, NULL, NULL);
+            SendMessage(g_gui.hSliderPeerVol, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
+            SendMessage(g_gui.hSliderPeerVol, TBM_SETPOS, TRUE, 100);
+            SendMessage(g_gui.hSliderPeerVol, TBM_SETTICFREQ, 25, 0);
+
+            g_gui.hStaticVolVal = CreateWindowA("STATIC", "100%",
+                                                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                                465, 286, 65, 20, hwnd, NULL, NULL, NULL);
+
             // Live Indicators: Mic Activity & Room Presence
             g_gui.hStaticMic = CreateWindowA("STATIC", "[ ○ MIC: OFF ]",
                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                             15, 278, 240, 20, hwnd, NULL, NULL, NULL);
+                                             15, 330, 230, 20, hwnd, NULL, NULL, NULL);
 
             g_gui.hStaticPeers = CreateWindowA("STATIC", "Room: Disconnected",
                                                WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                                               260, 278, 170, 20, hwnd, NULL, NULL, NULL);
+                                               250, 330, 180, 20, hwnd, NULL, NULL, NULL);
 
             g_gui.hChkHud = CreateWindowA("BUTTON", "Live Telemetry",
                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                          440, 278, 100, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
+                                          440, 330, 100, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
             SendMessage(g_gui.hChkHud, BM_SETCHECK, BST_CHECKED, 0);
 
             // Live Telemetry Readout Box
             g_gui.hEditHud = CreateWindowA("EDIT", "",
                                            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-                                           15, 302, 525, 160, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
+                                           15, 354, 525, 140, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
             SendMessage(g_gui.hEditHud, WM_SETFONT, (WPARAM)g_gui.hFontMono, TRUE);
 
-            // Status Bar Label
+            // Bottom Bar: Dark Mode Toggle (very bottom left) & Status Bar Label
+            g_gui.hBtnDarkMode = CreateWindowA("BUTTON", "Dark Mode",
+                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                               15, 502, 90, 25, hwnd, (HMENU)IDC_BTN_DARK_MODE, NULL, NULL);
+
             g_gui.hStaticStatus = CreateWindowA("STATIC", "Ready. Host a room or join with an invite code.",
                                                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                                15, 472, 525, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+                                                115, 506, 425, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
 
             // Apply system fonts to all controls
             HWND child = GetWindow(hwnd, GW_CHILD);
@@ -2386,6 +2469,76 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Start 250ms periodic timer for Live Telemetry HUD updates
             SetTimer(hwnd, IDT_TELEMETRY_TIMER, 250, NULL);
             break;
+        }
+
+        case WM_HSCROLL: {
+            if ((HWND)lParam == g_gui.hSliderPeerVol) {
+                int pos = (int)SendMessage(g_gui.hSliderPeerVol, TBM_GETPOS, 0, 0);
+                g_gui.peer_volume = pos;
+                g_audio.playback_volume = pos;
+                char vol_buf[32];
+                snprintf(vol_buf, sizeof(vol_buf), "%d%%", pos);
+                SetWindowTextA(g_gui.hStaticVolVal, vol_buf);
+            }
+            break;
+        }
+
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH hbr = g_gui.is_dark_mode ? g_gui.hbrDarkBg : (HBRUSH)(COLOR_BTNFACE + 1);
+            FillRect(hdc, &rc, hbr);
+            return 1;
+        }
+
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wParam;
+            HWND ctrl = (HWND)lParam;
+            if (ctrl == g_gui.hEditHud) {
+                if (g_gui.is_dark_mode) {
+                    SetTextColor(hdc, RGB(0, 255, 128));
+                    SetBkColor(hdc, RGB(24, 24, 24));
+                    return (LRESULT)g_gui.hbrDarkBg;
+                } else {
+                    SetTextColor(hdc, RGB(0, 0, 0));
+                    SetBkColor(hdc, RGB(255, 255, 255));
+                    return (LRESULT)GetStockObject(WHITE_BRUSH);
+                }
+            }
+            if (g_gui.is_dark_mode) {
+                SetTextColor(hdc, RGB(240, 240, 240));
+                SetBkColor(hdc, RGB(24, 24, 24));
+                return (LRESULT)g_gui.hbrDarkBg;
+            } else {
+                SetTextColor(hdc, RGB(0, 0, 0));
+                SetBkColor(hdc, GetSysColor(COLOR_BTNFACE));
+                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+            }
+        }
+
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = (HDC)wParam;
+            if (g_gui.is_dark_mode) {
+                SetTextColor(hdc, RGB(240, 240, 240));
+                SetBkColor(hdc, RGB(38, 38, 38));
+                return (LRESULT)g_gui.hbrDarkEdit;
+            } else {
+                SetTextColor(hdc, RGB(0, 0, 0));
+                SetBkColor(hdc, RGB(255, 255, 255));
+                return (LRESULT)GetStockObject(WHITE_BRUSH);
+            }
+        }
+
+        case WM_CTLCOLORBTN: {
+            HDC hdc = (HDC)wParam;
+            if (g_gui.is_dark_mode) {
+                SetTextColor(hdc, RGB(240, 240, 240));
+                SetBkColor(hdc, RGB(24, 24, 24));
+                return (LRESULT)g_gui.hbrDarkBg;
+            } else {
+                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+            }
         }
 
         case WM_TIMER: {
@@ -2413,6 +2566,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 gui_handle_paste_invite();
             } else if (id == IDC_BTN_TEST_MIC) {
                 gui_handle_test_mic();
+            } else if (id == IDC_BTN_DARK_MODE) {
+                g_gui.is_dark_mode = !g_gui.is_dark_mode;
+                SetWindowTextA(g_gui.hBtnDarkMode, g_gui.is_dark_mode ? "Light Mode" : "Dark Mode");
+                InvalidateRect(hwnd, NULL, TRUE);
+                RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             }
             break;
         }
@@ -2424,6 +2582,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             gui_handle_disconnect();
             KillTimer(hwnd, IDT_TELEMETRY_TIMER);
             if (g_gui.hFontMono) DeleteObject(g_gui.hFontMono);
+            if (g_gui.hbrDarkBg) DeleteObject(g_gui.hbrDarkBg);
+            if (g_gui.hbrDarkEdit) DeleteObject(g_gui.hbrDarkEdit);
             PostQuitMessage(0);
             break;
         }
@@ -2441,10 +2601,11 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     (void)hPrevInstance;
     (void)lpCmdLine;
 
-    // 1. Initialize COM and Winsock
+    // 1. Initialize COM, Winsock, and Common Controls
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
+    InitCommonControls();
 
     // 2. Initialize Telemetry, Ring Buffer, and Audio Engine
     telemetry_init();
@@ -2470,7 +2631,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                                 "preAlphaVoiceChat - Win32 Low-Latency Voice Client",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
-                                575, 545,
+                                575, 575,
                                 NULL, NULL, hInstance, NULL);
 
     if (!hwnd) {
