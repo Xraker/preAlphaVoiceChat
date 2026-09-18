@@ -6,7 +6,7 @@ echo  Building preAlphaVoiceChat with Clang...
 echo ===================================================
 
 clang main.c -o voicechat.exe ^
-    -lws2_32 -lbcrypt -lavrt -lole32 -luser32 -lgdi32 -lcomctl32 -loleaut32 ^
+    -lws2_32 -lbcrypt -lavrt -lole32 -luser32 -lgdi32 -lcomctl32 -loleaut32 -lwinhttp ^
     -Xlinker /subsystem:windows ^
     -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
 

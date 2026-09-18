@@ -121,6 +121,7 @@
 #include <bcrypt.h>
 #include <commctrl.h>
 #include <natupnp.h>
+#include <winhttp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -136,6 +137,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 ////////////////////////////////////////////////////////////////////////////////
 // CONSTANTS, PACKET STRUCTS & TYPES
@@ -772,11 +774,173 @@ static void audio_enumerate_devices(EDataFlow dataFlow, AudioDeviceList *list) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// WINSOCK2 UDP NETWORK ENGINE & RELAY SERVER (PHASE 5)
+// WINSOCK2 UDP NETWORK ENGINE & NAT TRAVERSAL (PHASE 5)
 ////////////////////////////////////////////////////////////////////////////////
 #define DEFAULT_RELAY_PORT      7777
 #define MAX_RELAY_CLIENTS       32
 #define CLIENT_TIMEOUT_US       10000000 // 10 seconds timeout for inactive peers
+
+static void get_local_ip(char *out_ip, size_t max_len) {
+    char hostname[256] = {0};
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        struct hostent *he = gethostbyname(hostname);
+        if (he && he->h_addr_list) {
+            for (int i = 0; he->h_addr_list[i] != NULL; i++) {
+                struct in_addr addr;
+                memcpy(&addr, he->h_addr_list[i], sizeof(struct in_addr));
+                const char *ip_str = inet_ntoa(addr);
+                if (ip_str && strncmp(ip_str, "127.", 4) != 0 && strncmp(ip_str, "169.254.", 8) != 0) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    return;
+                }
+            }
+        }
+    }
+    strncpy_s(out_ip, max_len, "127.0.0.1", _TRUNCATE);
+}
+
+#pragma pack(push, 1)
+typedef struct StunHeader {
+    uint16_t msg_type;
+    uint16_t msg_len;
+    uint32_t magic;
+    uint8_t  tx_id[12];
+} StunHeader;
+#pragma pack(pop)
+
+static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, char *out_ip, size_t max_len, int *out_port) {
+    DWORD timeout = 800;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+    struct hostent *he = gethostbyname(stun_host);
+    if (!he || !he->h_addr_list[0]) return false;
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons((u_short)stun_port);
+    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+
+    StunHeader req;
+    req.msg_type = htons(0x0001); // RFC 5389 Binding Request
+    req.msg_len  = htons(0x0000);
+    req.magic    = htonl(0x2112A442);
+    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
+
+    if (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) <= 0) {
+        return false;
+    }
+
+    uint8_t resp[512];
+    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
+    if (resp_len < 20) return false;
+
+    StunHeader *hdr = (StunHeader*)resp;
+    if (ntohs(hdr->msg_type) != 0x0101) return false;
+    if (ntohl(hdr->magic) != 0x2112A442) return false;
+    if (memcmp(hdr->tx_id, req.tx_id, 12) != 0) return false;
+
+    int offset = 20;
+    while (offset + 4 <= resp_len) {
+        uint16_t attr_type = ntohs(*(uint16_t*)(resp + offset));
+        uint16_t attr_len  = ntohs(*(uint16_t*)(resp + offset + 2));
+        offset += 4;
+        if (offset + attr_len > resp_len) break;
+
+        if (attr_type == 0x0020 && attr_len >= 8) { // XOR-MAPPED-ADDRESS
+            uint8_t family = resp[offset + 1];
+            if (family == 0x01) { // IPv4
+                uint16_t xor_port = *(uint16_t*)(resp + offset + 2);
+                uint16_t real_port = ntohs(xor_port ^ (uint16_t)(0x2112A442 >> 16));
+                uint32_t xor_ip = *(uint32_t*)(resp + offset + 4);
+                uint32_t real_ip = xor_ip ^ htonl(0x2112A442);
+
+                struct in_addr in;
+                in.s_addr = real_ip;
+                const char *ip_str = inet_ntoa(in);
+                if (ip_str) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    *out_port = (int)real_port;
+                    return true;
+                }
+            }
+        } else if (attr_type == 0x0001 && attr_len >= 8) { // MAPPED-ADDRESS
+            uint8_t family = resp[offset + 1];
+            if (family == 0x01) { // IPv4
+                uint16_t real_port = ntohs(*(uint16_t*)(resp + offset + 2));
+                uint32_t real_ip = *(uint32_t*)(resp + offset + 4);
+
+                struct in_addr in;
+                in.s_addr = real_ip;
+                const char *ip_str = inet_ntoa(in);
+                if (ip_str) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    *out_port = (int)real_port;
+                    return true;
+                }
+            }
+        }
+        offset += attr_len;
+        if (attr_len % 4 != 0) offset += (4 - (attr_len % 4));
+    }
+    return false;
+}
+
+static bool stun_resolve_endpoint(SOCKET s, char *out_ip, size_t max_len, int *out_port) {
+    if (stun_resolve_socket(s, "stun.l.google.com", 19302, out_ip, max_len, out_port)) return true;
+    if (stun_resolve_socket(s, "stun1.l.google.com", 19302, out_ip, max_len, out_port)) return true;
+    if (stun_resolve_socket(s, "stun2.l.google.com", 19302, out_ip, max_len, out_port)) return true;
+    return false;
+}
+
+static bool http_post(const char *topic, const char *payload) {
+    HINTERNET hSession = WinHttpOpen(L"VoiceChat/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+    HINTERNET hConnect = WinHttpConnect(hSession, L"ntfy.sh", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+    wchar_t wPath[256];
+    swprintf(wPath, 256, L"/%hs", topic);
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", wPath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    WinHttpSetTimeouts(hRequest, 1000, 1000, 2000, 2000);
+    BOOL bRes = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)payload, (DWORD)strlen(payload), (DWORD)strlen(payload), 0);
+    if (bRes) bRes = WinHttpReceiveResponse(hRequest, NULL);
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return bRes ? true : false;
+}
+
+static bool http_get(const char *topic, char *out_buf, size_t max_len) {
+    HINTERNET hSession = WinHttpOpen(L"VoiceChat/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+    HINTERNET hConnect = WinHttpConnect(hSession, L"ntfy.sh", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+    wchar_t wPath[256];
+    swprintf(wPath, 256, L"/%hs/raw?poll=1", topic);
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    WinHttpSetTimeouts(hRequest, 1000, 1000, 1500, 1500);
+    BOOL bRes = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (bRes) bRes = WinHttpReceiveResponse(hRequest, NULL);
+    bool success = false;
+    if (bRes) {
+        DWORD dwSize = 0;
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize > 0) {
+            DWORD dwDownloaded = 0;
+            DWORD to_read = (dwSize < (DWORD)max_len - 1) ? dwSize : (DWORD)max_len - 1;
+            if (WinHttpReadData(hRequest, out_buf, to_read, &dwDownloaded)) {
+                out_buf[dwDownloaded] = '\0';
+                success = true;
+            }
+        }
+    }
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return success;
+}
 
 #pragma pack(push, 1)
 typedef struct WirePacket {
@@ -800,7 +964,11 @@ typedef struct RelayServer {
     int                port;
     bool               is_running;
     HANDLE             hThread;
+    HANDLE             hPunchThread;
     uint32_t           host_sender_id;
+    char               session_token[32];
+    int                public_port;
+    char               public_ip[64];
     RelayClient        clients[MAX_RELAY_CLIENTS];
     CRITICAL_SECTION   cs;
 } RelayServer;
@@ -822,6 +990,9 @@ typedef struct NetworkClient {
     uint32_t           my_sender_id;
     bool               is_connected;
     HANDLE             hRecvThread;
+    char               session_token[32];
+    int                public_port;
+    char               public_ip[64];
     PeerPresence       peers[MAX_ROOM_PEERS];
     CRITICAL_SECTION   cs;
 } NetworkClient;
@@ -962,10 +1133,116 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
     return 0;
 }
 
-static bool relay_server_start(int port) {
+static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
+    (void)param;
+    char peer_topic[64];
+    snprintf(peer_topic, sizeof(peer_topic), "vchat_%s_peer", g_relay.session_token);
+
+    // Announce Host presence to rendezvous
+    char host_topic[64];
+    snprintf(host_topic, sizeof(host_topic), "vchat_%s_host", g_relay.session_token);
+    char host_payload[128];
+    char local_ip[64] = {0};
+    get_local_ip(local_ip, sizeof(local_ip));
+    snprintf(host_payload, sizeof(host_payload), "HOST:%s:%d:%s:%d",
+             g_relay.public_ip, g_relay.public_port, local_ip, g_relay.port);
+    http_post(host_topic, host_payload);
+
+    char last_sig[128] = {0};
+
+    // Poll for peers for 5 minutes or while running
+    for (int loop = 0; loop < 300 && g_relay.is_running; loop++) {
+        Sleep(500);
+        if (!g_relay.is_running) break;
+
+        char buf[512] = {0};
+        if (http_get(peer_topic, buf, sizeof(buf))) {
+            char *next_token = NULL;
+            char *line = strtok_s(buf, "\r\n", &next_token);
+            while (line) {
+                if (strncmp(line, "PEER:", 5) == 0 && strcmp(line, last_sig) != 0) {
+                    strncpy_s(last_sig, sizeof(last_sig), line, _TRUNCATE);
+                    char peer_pub_ip[64] = {0};
+                    int peer_pub_port = 0;
+                    char peer_lan_ip[64] = {0};
+                    int peer_lan_port = 0;
+
+                    char *p1 = line + 5;
+                    char *c1 = strchr(p1, ':');
+                    if (c1) {
+                        *c1 = '\0';
+                        strncpy_s(peer_pub_ip, sizeof(peer_pub_ip), p1, _TRUNCATE);
+                        char *p2 = c1 + 1;
+                        char *c2 = strchr(p2, ':');
+                        if (c2) {
+                            *c2 = '\0';
+                            peer_pub_port = atoi(p2);
+                            char *p3 = c2 + 1;
+                            char *c3 = strchr(p3, ':');
+                            if (c3) {
+                                *c3 = '\0';
+                                strncpy_s(peer_lan_ip, sizeof(peer_lan_ip), p3, _TRUNCATE);
+                                peer_lan_port = atoi(c3 + 1);
+                            } else {
+                                strncpy_s(peer_lan_ip, sizeof(peer_lan_ip), p3, _TRUNCATE);
+                            }
+                        } else {
+                            peer_pub_port = atoi(p2);
+                        }
+                    }
+
+                    // Punch 10 UDP packets to peer's endpoints to open Host's NAT firewall
+                    WirePacket punch;
+                    memset(&punch, 0, sizeof(punch));
+                    punch.header.magic = PACKET_MAGIC;
+                    punch.header.packet_type = PKT_TYPE_JOIN_ACK;
+                    punch.header.room_id = 0;
+                    punch.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
+                    punch.header.timestamp_us = telemetry_now_us();
+
+                    struct sockaddr_in target_pub, target_lan, target_loop;
+                    memset(&target_pub, 0, sizeof(target_pub));
+                    memset(&target_lan, 0, sizeof(target_lan));
+                    memset(&target_loop, 0, sizeof(target_loop));
+
+                    if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0) {
+                        target_pub.sin_family = AF_INET;
+                        target_pub.sin_port = htons((u_short)peer_pub_port);
+                        inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
+                    }
+                    if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0) {
+                        target_lan.sin_family = AF_INET;
+                        target_lan.sin_port = htons((u_short)peer_lan_port);
+                        inet_pton(AF_INET, peer_lan_ip, &target_lan.sin_addr);
+
+                        target_loop.sin_family = AF_INET;
+                        target_loop.sin_port = htons((u_short)peer_lan_port);
+                        inet_pton(AF_INET, "127.0.0.1", &target_loop.sin_addr);
+                    }
+
+                    for (int burst = 0; burst < 10; burst++) {
+                        if (target_pub.sin_port != 0) {
+                            sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0, (struct sockaddr*)&target_pub, sizeof(target_pub));
+                        }
+                        if (target_lan.sin_port != 0) {
+                            sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0, (struct sockaddr*)&target_lan, sizeof(target_lan));
+                            sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0, (struct sockaddr*)&target_loop, sizeof(target_loop));
+                        }
+                        Sleep(25);
+                    }
+                }
+                line = strtok_s(NULL, "\r\n", &next_token);
+            }
+        }
+    }
+    return 0;
+}
+
+static bool relay_server_start(int port, const char *token) {
     memset(&g_relay, 0, sizeof(g_relay));
     InitializeCriticalSection(&g_relay.cs);
     g_relay.port = port;
+    if (token) strncpy_s(g_relay.session_token, sizeof(g_relay.session_token), token, _TRUNCATE);
 
     g_relay.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_relay.sock == INVALID_SOCKET) return false;
@@ -985,8 +1262,18 @@ static bool relay_server_start(int port) {
         return false;
     }
 
+    // Discover public STUN endpoint for THIS exact relay socket
+    g_relay.public_port = port;
+    if (!stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &g_relay.public_port)) {
+        get_local_ip(g_relay.public_ip, sizeof(g_relay.public_ip));
+        g_relay.public_port = port;
+    }
+
     g_relay.is_running = true;
     g_relay.hThread = CreateThread(NULL, 0, relay_server_thread, NULL, 0, NULL);
+    if (strlen(g_relay.session_token) > 0) {
+        g_relay.hPunchThread = CreateThread(NULL, 0, host_hole_punch_thread, NULL, 0, NULL);
+    }
     return true;
 }
 
@@ -996,6 +1283,11 @@ static void relay_server_stop(void) {
     if (g_relay.sock != INVALID_SOCKET) {
         closesocket(g_relay.sock);
         g_relay.sock = INVALID_SOCKET;
+    }
+    if (g_relay.hPunchThread) {
+        WaitForSingleObject(g_relay.hPunchThread, 1000);
+        CloseHandle(g_relay.hPunchThread);
+        g_relay.hPunchThread = NULL;
     }
     if (g_relay.hThread) {
         WaitForSingleObject(g_relay.hThread, 1000);
@@ -1066,7 +1358,7 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
     return 0;
 }
 
-static bool network_client_connect(const char *wan_ip, const char *lan_ip, int server_port, uint16_t room_id) {
+static bool network_client_connect(const char *wan_ip, const char *lan_ip, int server_port, uint16_t room_id, const char *session_token) {
     memset(&g_net_client, 0, sizeof(g_net_client));
     InitializeCriticalSection(&g_net_client.cs);
 
@@ -1074,6 +1366,42 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     if (g_net_client.sock == INVALID_SOCKET) {
         DeleteCriticalSection(&g_net_client.cs);
         return false;
+    }
+
+    // Bind client socket to ephemeral local port
+    struct sockaddr_in client_bind;
+    memset(&client_bind, 0, sizeof(client_bind));
+    client_bind.sin_family = AF_INET;
+    client_bind.sin_port = 0;
+    client_bind.sin_addr.s_addr = INADDR_ANY;
+    bind(g_net_client.sock, (struct sockaddr*)&client_bind, sizeof(client_bind));
+
+    // Get bound local port
+    struct sockaddr_in bound_addr;
+    int bound_len = sizeof(bound_addr);
+    getsockname(g_net_client.sock, (struct sockaddr*)&bound_addr, &bound_len);
+    int client_local_port = ntohs(bound_addr.sin_port);
+
+    // If session token provided, resolve STUN endpoint on THIS socket and publish to rendezvous
+    if (session_token && strlen(session_token) > 0) {
+        strncpy_s(g_net_client.session_token, sizeof(g_net_client.session_token), session_token, _TRUNCATE);
+        char my_pub_ip[64] = {0};
+        int my_pub_port = 0;
+        char my_lan_ip[64] = {0};
+        get_local_ip(my_lan_ip, sizeof(my_lan_ip));
+
+        if (!stun_resolve_endpoint(g_net_client.sock, my_pub_ip, sizeof(my_pub_ip), &my_pub_port)) {
+            strncpy_s(my_pub_ip, sizeof(my_pub_ip), my_lan_ip, _TRUNCATE);
+            my_pub_port = client_local_port;
+        }
+        strncpy_s(g_net_client.public_ip, sizeof(g_net_client.public_ip), my_pub_ip, _TRUNCATE);
+        g_net_client.public_port = my_pub_port;
+
+        char topic[64];
+        snprintf(topic, sizeof(topic), "vchat_%s_peer", session_token);
+        char payload[128];
+        snprintf(payload, sizeof(payload), "PEER:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
+        http_post(topic, payload);
     }
 
     // Set receive timeout for probing (250ms per probe attempt)
@@ -1086,11 +1414,13 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     g_net_client.room_id = room_id;
 
     // Prepare candidate addresses
-    struct sockaddr_in wan_addr, lan_addr;
+    struct sockaddr_in wan_addr, lan_addr, loop_addr;
     bool has_wan = false, has_lan = false;
+    memset(&wan_addr, 0, sizeof(wan_addr));
+    memset(&lan_addr, 0, sizeof(lan_addr));
+    memset(&loop_addr, 0, sizeof(loop_addr));
 
     if (wan_ip && strlen(wan_ip) > 0) {
-        memset(&wan_addr, 0, sizeof(wan_addr));
         wan_addr.sin_family = AF_INET;
         wan_addr.sin_port = htons((u_short)server_port);
         if (inet_pton(AF_INET, wan_ip, &wan_addr.sin_addr) == 1) {
@@ -1099,13 +1429,16 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     }
 
     if (lan_ip && strlen(lan_ip) > 0 && (!has_wan || strcmp(wan_ip, lan_ip) != 0)) {
-        memset(&lan_addr, 0, sizeof(lan_addr));
         lan_addr.sin_family = AF_INET;
         lan_addr.sin_port = htons((u_short)server_port);
         if (inet_pton(AF_INET, lan_ip, &lan_addr.sin_addr) == 1) {
             has_lan = true;
         }
     }
+
+    loop_addr.sin_family = AF_INET;
+    loop_addr.sin_port = htons((u_short)server_port);
+    inet_pton(AF_INET, "127.0.0.1", &loop_addr.sin_addr);
 
     if (!has_wan && !has_lan) {
         closesocket(g_net_client.sock);
@@ -1129,14 +1462,15 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     WirePacket ack;
 
     // Probe loop: send JOIN_REQ to candidate addresses, wait for JOIN_ACK
-    // Up to 10 attempts * 250ms = 2.5 seconds max
-    for (int attempt = 0; attempt < 10 && !handshake_ok; attempt++) {
+    // Up to 15 attempts * 250ms = ~3.75 seconds max
+    for (int attempt = 0; attempt < 15 && !handshake_ok; attempt++) {
         if (has_lan) {
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
         }
         if (has_wan) {
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
         }
+        sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&loop_addr, sizeof(loop_addr));
 
         while (true) {
             resp_len = sizeof(responder_addr);
@@ -1146,7 +1480,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             if (bytes >= (int)sizeof(PacketHeader) &&
                 ack.header.magic == PACKET_MAGIC &&
                 ack.header.packet_type == PKT_TYPE_JOIN_ACK &&
-                ack.header.room_id == room_id) {
+                (ack.header.room_id == room_id || ack.header.room_id == 0)) {
                 // Handshake success! Lock onto the responding address
                 g_net_client.server_addr = responder_addr;
                 handshake_ok = true;
@@ -1607,25 +1941,6 @@ static bool paste_from_clipboard(HWND hwnd, char *out_text, size_t max_len) {
     return true;
 }
 
-static void get_local_ip(char *out_ip, size_t max_len) {
-    char hostname[256] = {0};
-    if (gethostname(hostname, sizeof(hostname)) == 0) {
-        struct hostent *he = gethostbyname(hostname);
-        if (he && he->h_addr_list) {
-            for (int i = 0; he->h_addr_list[i] != NULL; i++) {
-                struct in_addr addr;
-                memcpy(&addr, he->h_addr_list[i], sizeof(struct in_addr));
-                const char *ip_str = inet_ntoa(addr);
-                if (ip_str && strncmp(ip_str, "127.", 4) != 0 && strncmp(ip_str, "169.254.", 8) != 0) {
-                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    return;
-                }
-            }
-        }
-    }
-    strncpy_s(out_ip, max_len, "127.0.0.1", _TRUNCATE);
-}
-
 // Static GUIDs for UPnP NAT Traversal
 static const GUID LOCAL_CLSID_UPnPNAT = {0xAE1E00AA, 0x3FD5, 0x403C, {0x8A, 0x27, 0x2B, 0xBD, 0xC3, 0x0C, 0xD0, 0xE1}};
 static const GUID LOCAL_IID_IUPnPNAT  = {0xB171C812, 0xCC76, 0x485A, {0x94, 0xD8, 0xB6, 0xB3, 0xA2, 0x79, 0x4E, 0x99}};
@@ -1679,103 +1994,22 @@ static void upnp_unmap_port(int port) {
     pNat->lpVtbl->Release(pNat);
 }
 
-#pragma pack(push, 1)
-typedef struct StunHeader {
-    uint16_t msg_type;
-    uint16_t msg_len;
-    uint32_t magic;
-    uint8_t  tx_id[12];
-} StunHeader;
-#pragma pack(pop)
-
 static bool stun_get_public_ip(const char *stun_host, int stun_port, char *out_ip, size_t max_len) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return false;
-
-    DWORD timeout = 600; // 600ms quick discovery timeout
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    struct hostent *he = gethostbyname(stun_host);
-    if (!he || !he->h_addr_list[0]) {
-        closesocket(s);
-        return false;
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons((u_short)stun_port);
-    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
-
-    StunHeader req;
-    req.msg_type = htons(0x0001); // Binding Request
-    req.msg_len  = htons(0x0000);
-    req.magic    = htonl(0x2112A442);
-    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
-
-    if (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) <= 0) {
-        closesocket(s);
-        return false;
-    }
-
-    uint8_t resp[512];
-    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
+    int dummy_port = 0;
+    bool ok = stun_resolve_socket(s, stun_host, stun_port, out_ip, max_len, &dummy_port);
     closesocket(s);
-
-    if (resp_len < 20) return false;
-
-    StunHeader *hdr = (StunHeader*)resp;
-    if (ntohs(hdr->msg_type) != 0x0101) return false; // Binding Success
-    if (ntohl(hdr->magic) != 0x2112A442) return false;
-    if (memcmp(hdr->tx_id, req.tx_id, 12) != 0) return false;
-
-    int offset = 20;
-    while (offset + 4 <= resp_len) {
-        uint16_t attr_type = ntohs(*(uint16_t*)(resp + offset));
-        uint16_t attr_len  = ntohs(*(uint16_t*)(resp + offset + 2));
-        offset += 4;
-
-        if (offset + attr_len > resp_len) break;
-
-        if (attr_type == 0x0020 && attr_len >= 8) { // XOR-MAPPED-ADDRESS
-            uint8_t family = resp[offset + 1];
-            if (family == 0x01) { // IPv4
-                uint32_t xor_ip = *(uint32_t*)(resp + offset + 4);
-                uint32_t real_ip = xor_ip ^ htonl(0x2112A442);
-
-                struct in_addr in;
-                in.s_addr = real_ip;
-                const char *ip_str = inet_ntoa(in);
-                if (ip_str) {
-                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    return true;
-                }
-            }
-        } else if (attr_type == 0x0001 && attr_len >= 8) { // MAPPED-ADDRESS
-            uint8_t family = resp[offset + 1];
-            if (family == 0x01) { // IPv4
-                uint32_t real_ip = *(uint32_t*)(resp + offset + 4);
-                struct in_addr in;
-                in.s_addr = real_ip;
-                const char *ip_str = inet_ntoa(in);
-                if (ip_str) {
-                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    return true;
-                }
-            }
-        }
-        offset += attr_len;
-        if (attr_len % 4 != 0) offset += (4 - (attr_len % 4));
-    }
-
-    return false;
+    return ok;
 }
 
 static bool parse_invite_string(const char *invite,
                                 char *wan_ip, size_t wan_ip_len,
                                 char *lan_ip, size_t lan_ip_len,
                                 int *port, uint16_t *room,
-                                char *key, size_t key_len) {
+                                char *key, size_t key_len,
+                                char *token, size_t token_len) {
+    if (token && token_len > 0) token[0] = '\0';
     if (!invite) return false;
     char temp[256];
     strncpy_s(temp, sizeof(temp), invite, _TRUNCATE);
@@ -1814,7 +2048,16 @@ static bool parse_invite_string(const char *invite,
         if (hash2) {
             *hash2 = '\0';
             *room = (uint16_t)atoi(hash1 + 1);
-            strncpy_s(key, key_len, hash2 + 1, _TRUNCATE);
+            char *hash3 = strchr(hash2 + 1, '#');
+            if (hash3) {
+                *hash3 = '\0';
+                strncpy_s(key, key_len, hash2 + 1, _TRUNCATE);
+                if (token && token_len > 0) {
+                    strncpy_s(token, token_len, hash3 + 1, _TRUNCATE);
+                }
+            } else {
+                strncpy_s(key, key_len, hash2 + 1, _TRUNCATE);
+            }
         } else {
             *room = (uint16_t)atoi(hash1 + 1);
         }
@@ -1944,7 +2187,6 @@ static void gui_handle_host(void) {
     char room_str[16] = {0};
     char key[128] = {0};
     char local_ip[64] = {0};
-    char public_ip[64] = {0};
 
     GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
     GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
@@ -1961,38 +2203,42 @@ static void gui_handle_host(void) {
     // 1. Discover local LAN IP
     get_local_ip(local_ip, sizeof(local_ip));
 
-    // 2. Discover public WAN IP via STUN (RFC 5389)
-    gui_update_status("Discovering network topology & STUN public IP...");
-    bool has_public = stun_get_public_ip("stun.l.google.com", 19302, public_ip, sizeof(public_ip));
-    if (!has_public) {
-        has_public = stun_get_public_ip("stun1.l.google.com", 19302, public_ip, sizeof(public_ip));
-    }
+    // 2. Generate random 8-character session token for zero-config hole punching
+    char session_token[32];
+    snprintf(session_token, sizeof(session_token), "%04X%04X",
+             (unsigned)(rand() & 0xFFFF), (unsigned)(rand() & 0xFFFF));
 
-    // 3. Attempt UPnP automatic router port mapping
+    // 3. Attempt UPnP automatic router port mapping as helper
     bool upnp_ok = upnp_map_port(port, local_ip);
 
-    // 4. Formulate the invite code (transparent WAN+LAN dual addressing)
+    gui_update_status("Opening UDP socket & discovering STUN public endpoint...");
+
+    // 4. Start Relay Server on this machine (binds socket & queries STUN directly on that socket)
+    if (!relay_server_start(port, session_token)) {
+        if (upnp_ok) upnp_unmap_port(port);
+        MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
+        return;
+    }
+
+    // 5. Formulate the invite code (STUN public mapped port + LAN + room + key + session token)
     char invite_str[256];
-    if (has_public && strcmp(public_ip, local_ip) != 0) {
-        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s", public_ip, local_ip, port, room_id, key);
+    bool has_public = (strlen(g_relay.public_ip) > 0 && strcmp(g_relay.public_ip, "127.0.0.1") != 0);
+
+    if (has_public && strcmp(g_relay.public_ip, local_ip) != 0) {
+        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s#%s",
+                 g_relay.public_ip, local_ip, g_relay.public_port, room_id, key, session_token);
         char display_ip[128];
-        snprintf(display_ip, sizeof(display_ip), "%s (+LAN: %s)", public_ip, local_ip);
+        snprintf(display_ip, sizeof(display_ip), "%s (+LAN: %s)", g_relay.public_ip, local_ip);
         SetWindowTextA(g_gui.hEditIp, display_ip);
     } else {
-        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", local_ip, port, room_id, key);
+        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s#%s",
+                 local_ip, g_relay.public_port, room_id, key, session_token);
         SetWindowTextA(g_gui.hEditIp, local_ip);
     }
     SetWindowTextA(g_gui.hEditInvite, invite_str);
 
     // Automatically copy invite to clipboard for convenience
     copy_to_clipboard(g_gui.hwndMain, invite_str);
-
-    // 5. Start Relay Server on this machine
-    if (!relay_server_start(port)) {
-        if (upnp_ok) upnp_unmap_port(port);
-        MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
-        return;
-    }
 
     // 6. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
@@ -2003,7 +2249,7 @@ static void gui_handle_host(void) {
     }
 
     // 7. Connect local UDP client to loopback 127.0.0.1 for zero overhead
-    if (!network_client_connect("127.0.0.1", NULL, port, room_id)) {
+    if (!network_client_connect("127.0.0.1", NULL, port, room_id, NULL)) {
         MessageBoxA(g_gui.hwndMain, "Failed to connect client to local relay!", "Error", MB_ICONERROR);
         crypto_cleanup();
         if (upnp_ok) upnp_unmap_port(port);
@@ -2041,12 +2287,12 @@ static void gui_handle_host(void) {
     EnableWindow(g_gui.hEditKey, FALSE);
 
     char status_buf[256];
-    if (upnp_ok) {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [UPnP Port Opened & Public IP Ready] | Invite copied!", room_id, port);
-    } else if (has_public) {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Public IP: %s | LAN: %s] | Invite copied!", room_id, port, public_ip, local_ip);
+    if (has_public) {
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u [STUN: %s:%d | LAN: %s] | Invite copied! Ready for peers.",
+                 room_id, g_relay.public_ip, g_relay.public_port, local_ip);
     } else {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s] | Invite copied!", room_id, port, local_ip);
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s] | Invite copied! Ready for peers.",
+                 room_id, port, local_ip);
     }
     gui_update_status(status_buf);
 }
@@ -2072,6 +2318,7 @@ static void gui_handle_join(void) {
 
     char wan_ip[64] = {0};
     char lan_ip[64] = {0};
+    char session_token[32] = {0};
 
     // First check if an invite was entered in hEditInvite
     char invite_in_box[256] = {0};
@@ -2081,7 +2328,9 @@ static void gui_handle_join(void) {
     char parsed_key[128] = {0};
 
     if (strlen(invite_in_box) > 0 &&
-        parse_invite_string(invite_in_box, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip), &parsed_port, &parsed_room, parsed_key, sizeof(parsed_key))) {
+        parse_invite_string(invite_in_box, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip),
+                            &parsed_port, &parsed_room, parsed_key, sizeof(parsed_key),
+                            session_token, sizeof(session_token))) {
         port = parsed_port;
         room_id = parsed_room;
         if (strlen(parsed_key) > 0) strcpy_s(key, sizeof(key), parsed_key);
@@ -2111,14 +2360,22 @@ static void gui_handle_join(void) {
 
     // Format invite string into edit box
     char invite_str[256];
-    if (strlen(lan_ip) > 0) {
-        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s", wan_ip, lan_ip, port, room_id, key);
+    if (strlen(session_token) > 0) {
+        if (strlen(lan_ip) > 0) {
+            snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s#%s", wan_ip, lan_ip, port, room_id, key, session_token);
+        } else {
+            snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s#%s", wan_ip, port, room_id, key, session_token);
+        }
     } else {
-        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", wan_ip, port, room_id, key);
+        if (strlen(lan_ip) > 0) {
+            snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s", wan_ip, lan_ip, port, room_id, key);
+        } else {
+            snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", wan_ip, port, room_id, key);
+        }
     }
     SetWindowTextA(g_gui.hEditInvite, invite_str);
 
-    gui_update_status("Probing host with real handshake (zero blind joins)...");
+    gui_update_status("Traversing NAT & establishing direct P2P hole punch...");
 
     // 1. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
@@ -2126,14 +2383,14 @@ static void gui_handle_join(void) {
         return;
     }
 
-    // 2. Connect UDP network client with real handshake
-    if (!network_client_connect(wan_ip, lan_ip, port, room_id)) {
+    // 2. Connect UDP network client with Method A hole punching
+    if (!network_client_connect(wan_ip, lan_ip, port, room_id, session_token)) {
         crypto_cleanup();
         MessageBoxA(g_gui.hwndMain,
             "Failed to connect to host!\r\n\r\n"
-            "No response was received from the host.\r\n"
+            "Could not establish connection with the host room.\r\n"
             "- Ensure the host has created the room.\r\n"
-            "- If connecting across the Internet, ensure the host has port 7777 open/forwarded.",
+            "- Confirm the invite code was copied correctly.",
             "Connection Error", MB_ICONERROR);
         gui_update_status("Connection failed: Host unreachable.");
         return;
@@ -2169,7 +2426,8 @@ static void gui_handle_join(void) {
     inet_ntop(AF_INET, &g_net_client.server_addr.sin_addr, resolved_ip, sizeof(resolved_ip));
 
     char status_buf[256];
-    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u via %s:%d | Streaming audio...", room_id, resolved_ip, port);
+    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u via %s:%d [Hole Punch Active] | Streaming audio...",
+             room_id, resolved_ip, ntohs(g_net_client.server_addr.sin_port));
     gui_update_status(status_buf);
 }
 
@@ -2208,8 +2466,9 @@ static void gui_handle_paste_invite(void) {
     int port = 7777;
     uint16_t room = 1;
     char key[128] = {0};
+    char token[32] = {0};
 
-    if (parse_invite_string(clip_str, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip), &port, &room, key, sizeof(key))) {
+    if (parse_invite_string(clip_str, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip), &port, &room, key, sizeof(key), token, sizeof(token))) {
         SetWindowTextA(g_gui.hEditInvite, clip_str);
         if (strlen(lan_ip) > 0) {
             char combined[128];
