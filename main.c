@@ -1148,6 +1148,8 @@ typedef struct RelayServer {
     char               session_token[32];
     int                public_port;
     char               public_ip[64];
+    bool               upnp_active;
+    int                stun_port;
     RelayClient        clients[MAX_RELAY_CLIENTS];
     struct sockaddr_in confirmed_peer_addr;
     bool               has_confirmed_peer;
@@ -1442,7 +1444,14 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
         if (now_us - last_stun_keepalive_us >= 3000000) {
             last_stun_keepalive_us = now_us;
             int prev_port = g_relay.public_port;
-            stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &g_relay.public_port);
+            int current_stun = g_relay.stun_port ? g_relay.stun_port : g_relay.port;
+            stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &current_stun);
+            g_relay.stun_port = current_stun;
+            if (!g_relay.upnp_active) {
+                g_relay.public_port = current_stun;
+            } else {
+                g_relay.public_port = g_relay.port;
+            }
             if (g_relay.public_port != prev_port && g_relay.mqtt_sock != INVALID_SOCKET) {
                 snprintf(host_payload, sizeof(host_payload), "HOST:%s:%d:%s:%d",
                          g_relay.public_ip, g_relay.public_port, local_ip, g_relay.port);
@@ -1467,10 +1476,9 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                        (struct sockaddr*)&g_relay.confirmed_peer_addr, sizeof(g_relay.confirmed_peer_addr));
             }
 
-            struct sockaddr_in target_pub, target_lan, target_loop;
+            struct sockaddr_in target_pub, target_lan;
             memset(&target_pub, 0, sizeof(target_pub));
             memset(&target_lan, 0, sizeof(target_lan));
-            memset(&target_loop, 0, sizeof(target_loop));
 
             if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0 && now_us < punch_until_us) {
                 target_pub.sin_family = AF_INET;
@@ -1487,18 +1495,12 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                 }
             }
 
-            if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0 && now_us < punch_until_us) {
+            if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0 && now_us < punch_until_us && strcmp(peer_lan_ip, "127.0.0.1") != 0) {
                 target_lan.sin_family = AF_INET;
                 target_lan.sin_port = htons((u_short)peer_lan_port);
                 inet_pton(AF_INET, peer_lan_ip, &target_lan.sin_addr);
                 sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
                        (struct sockaddr*)&target_lan, sizeof(target_lan));
-
-                target_loop.sin_family = AF_INET;
-                target_loop.sin_port = htons((u_short)peer_lan_port);
-                inet_pton(AF_INET, "127.0.0.1", &target_loop.sin_addr);
-                sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                       (struct sockaddr*)&target_loop, sizeof(target_loop));
             }
         }
     }
@@ -1511,10 +1513,11 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
     return 0;
 }
 
-static bool relay_server_start(int port, const char *token) {
+static bool relay_server_start(int port, const char *token, bool upnp_active) {
     memset(&g_relay, 0, sizeof(g_relay));
     InitializeCriticalSection(&g_relay.cs);
     g_relay.port = port;
+    g_relay.upnp_active = upnp_active;
     g_relay.mqtt_sock = INVALID_SOCKET;
     if (token) strncpy_s(g_relay.session_token, sizeof(g_relay.session_token), token, _TRUNCATE);
 
@@ -1540,10 +1543,19 @@ static bool relay_server_start(int port, const char *token) {
     }
 
     // Discover public STUN endpoint for THIS exact relay socket
-    g_relay.public_port = port;
-    if (!stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &g_relay.public_port)) {
+    int stun_port = port;
+    if (stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &stun_port)) {
+        g_relay.stun_port = stun_port;
+    } else {
         get_local_ip(g_relay.public_ip, sizeof(g_relay.public_ip));
+        g_relay.stun_port = port;
+    }
+
+    // If UPnP is active, the external router port is guaranteed to be 'port'!
+    if (upnp_active) {
         g_relay.public_port = port;
+    } else {
+        g_relay.public_port = g_relay.stun_port;
     }
 
     g_relay.is_running = true;
@@ -1847,6 +1859,11 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                     sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
                 }
             }
+            // Dual-candidate probe: Also probe default port (7777) in case host is on UPnP / port forwarded
+            if (server_port != DEFAULT_RELAY_PORT) {
+                wan_addr.sin_port = htons((u_short)DEFAULT_RELAY_PORT);
+                sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
+            }
         }
 
         // Probing Loopback ONLY if connecting to local host
@@ -1880,7 +1897,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                     network_client_record_peer(ack.header.sender_id, telemetry_now_us());
                 }
 
-                // Send burst of 3 confirmation ACKs to host so host's NAT pinhole locks instantly
+                // Send burst of 5 confirmation ACKs to host so host's NAT pinhole locks instantly
                 WirePacket reply;
                 memset(&reply, 0, sizeof(reply));
                 reply.header.magic = PACKET_MAGIC;
@@ -1888,7 +1905,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                 reply.header.room_id = room_id;
                 reply.header.sender_id = g_net_client.my_sender_id;
                 reply.header.timestamp_us = telemetry_now_us();
-                for (int b = 0; b < 3; b++) {
+                for (int b = 0; b < 5; b++) {
                     sendto(g_net_client.sock, (const char*)&reply, sizeof(PacketHeader), 0,
                            (struct sockaddr*)&responder_addr, sizeof(responder_addr));
                 }
@@ -2639,7 +2656,7 @@ static void gui_handle_host(void) {
     gui_update_status("Opening UDP socket & discovering STUN public endpoint...");
 
     // 4. Start Relay Server on this machine (binds socket & queries STUN directly on that socket)
-    if (!relay_server_start(port, session_token)) {
+    if (!relay_server_start(port, session_token, upnp_ok)) {
         if (upnp_ok) upnp_unmap_port(port);
         MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
         return;
