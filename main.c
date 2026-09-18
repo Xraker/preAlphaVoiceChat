@@ -1719,7 +1719,7 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                        (struct sockaddr*)&target_pub, sizeof(target_pub));
                 g_relay.total_replies_sent++;
 
-                // 2. Sequential port prediction (+1, +2) for cellular CGNAT
+                // 2. Sequential port prediction (+1, +2, -1, -2) for cellular CGNAT
                 if (peer_pub_port < 65535) {
                     target_pub.sin_port = htons((u_short)(peer_pub_port + 1));
                     sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
@@ -1727,6 +1727,16 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                 }
                 if (peer_pub_port < 65534) {
                     target_pub.sin_port = htons((u_short)(peer_pub_port + 2));
+                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                           (struct sockaddr*)&target_pub, sizeof(target_pub));
+                }
+                if (peer_pub_port > 1) {
+                    target_pub.sin_port = htons((u_short)(peer_pub_port - 1));
+                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                           (struct sockaddr*)&target_pub, sizeof(target_pub));
+                }
+                if (peer_pub_port > 2) {
+                    target_pub.sin_port = htons((u_short)(peer_pub_port - 2));
                     sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
                            (struct sockaddr*)&target_pub, sizeof(target_pub));
                 }
@@ -1808,13 +1818,16 @@ static bool relay_server_start(int port, const char *token, bool upnp_active) {
         net_log("HOST-RELAY", "STUN failed; using local IP %s as fallback public IP.", g_relay.public_ip);
     }
 
-    // If UPnP is active, the external router port is guaranteed to be 'port'!
-    if (upnp_active) {
-        g_relay.public_port = port;
-        net_log("HOST-RELAY", "UPnP is ACTIVE: Host external port locked to %d", port);
-    } else {
+    // Always prefer the STUN-resolved reflexive port for the relay socket!
+    // STUN discovers the true WAN port opened by the NAT/CGNAT/router for this socket.
+    // Even if UPnP reported success locally, ISP/carrier NAT may remap the external port.
+    if (g_relay.stun_port > 0) {
         g_relay.public_port = g_relay.stun_port;
-        net_log("HOST-RELAY", "UPnP inactive: Host external port set from STUN (%d)", g_relay.public_port);
+        net_log("HOST-RELAY", "Host external port set from STUN reflexive mapping: %d (UPnP status: %s)",
+                g_relay.public_port, upnp_active ? "Active" : "Inactive");
+    } else {
+        g_relay.public_port = port;
+        net_log("HOST-RELAY", "STUN port unavailable; defaulting host external port to %d", port);
     }
     // Reset receive timeout to 100ms so relay_server_thread responds promptly
     DWORD server_rcvto = 100;
@@ -2096,20 +2109,25 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                     net_log("CLIENT-MQTT", "RECV MQTT on [%s]: '%s'", r_top, r_pay);
                     if (strncmp(r_pay, "HOST:", 5) == 0 || strncmp(r_pay, "PUNCHING:", 9) == 0) {
                         g_join_diag.host_acknowledged = true;
-                        if (strncmp(r_pay, "HOST:", 5) == 0) {
-                            // HOST:<pub_ip>:<pub_port>:<lan_ip>:<port>
-                            char *hp1 = r_pay + 5;
-                            char *hc1 = strchr(hp1, ':');
+                        char *prefix_colon = strchr(r_pay, ':');
+                        if (prefix_colon) {
+                            char *hp1 = prefix_colon + 1; // pub_ip
+                            char *hc1 = strchr(hp1, ':'); // :pub_port
                             if (hc1) {
                                 *hc1 = '\0';
                                 char *hp2 = hc1 + 1;
                                 char *hc2 = strchr(hp2, ':');
-                                if (hc2) {
-                                    *hc2 = '\0';
-                                    int h_port = atoi(hp2);
-                                    if (h_port > 0 && h_port <= 65535 && h_port != server_port) {
-                                        net_log("CLIENT-MQTT", "Host updated port on MQTT: %d -> %d", server_port, h_port);
-                                        server_port = h_port;
+                                if (hc2) *hc2 = '\0';
+                                int h_port = atoi(hp2);
+                                if (h_port > 0 && h_port <= 65535 && h_port != server_port) {
+                                    net_log("CLIENT-MQTT", "Host updated port on MQTT: %d -> %d", server_port, h_port);
+                                    server_port = h_port;
+                                }
+                                if (hp1[0] != '\0') {
+                                    struct in_addr test_in;
+                                    if (inet_pton(AF_INET, hp1, &test_in) == 1) {
+                                        wan_addr.sin_addr = test_in;
+                                        has_wan = true;
                                     }
                                 }
                             }
@@ -3040,6 +3058,9 @@ static void gui_handle_host(void) {
         SetWindowTextA(g_gui.hEditIp, local_ip);
     }
     SetWindowTextA(g_gui.hEditInvite, invite_str);
+    char port_disp[16];
+    snprintf(port_disp, sizeof(port_disp), "%d", g_relay.public_port);
+    SetWindowTextA(g_gui.hEditPort, port_disp);
     net_log("GUI", "Invite code generated: '%s'", invite_str);
 
     // Automatically copy invite to clipboard for convenience
