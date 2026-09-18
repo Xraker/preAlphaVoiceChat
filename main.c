@@ -120,6 +120,7 @@
 #include <avrt.h>
 #include <bcrypt.h>
 #include <commctrl.h>
+#include <natupnp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -534,6 +535,18 @@ static void ring_buffer_init(void) {
     memset(&g_ring_buf, 0, sizeof(g_ring_buf));
     InitializeCriticalSection(&g_ring_buf.cs);
     g_ring_buf.buffering = true;
+}
+
+static void ring_buffer_reset(void) {
+    EnterCriticalSection(&g_ring_buf.cs);
+    for (int i = 0; i < RING_BUFFER_SLOTS; i++) {
+        g_ring_buf.slots[i].occupied = false;
+    }
+    g_ring_buf.occupied_count = 0;
+    g_ring_buf.read_seq = 0;
+    g_ring_buf.write_seq = 0;
+    g_ring_buf.buffering = true;
+    LeaveCriticalSection(&g_ring_buf.cs);
 }
 
 static void ring_buffer_push(uint32_t seq, const uint8_t *pcm, uint32_t len) {
@@ -993,6 +1006,7 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
             continue;
         }
 
+        // Auto-lock onto the active responding address (LAN or WAN)
         // Record incoming telemetry metrics
         telemetry_record_recv(bytes, packet.header.sequence, packet.header.timestamp_us);
 
@@ -1027,6 +1041,15 @@ static bool network_client_connect(const char *server_ip, int server_port, uint1
 
     g_net_client.room_id = room_id;
     g_net_client.is_connected = true;
+
+    // Send initial handshake probe
+    WirePacket probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.header.magic = PACKET_MAGIC;
+    probe.header.room_id = room_id;
+    probe.header.sender_id = g_net_client.my_sender_id;
+    probe.header.timestamp_us = telemetry_now_us();
+    sendto(g_net_client.sock, (const char*)&probe, sizeof(probe), 0, (struct sockaddr*)&g_net_client.server_addr, sizeof(g_net_client.server_addr));
 
     g_net_client.hRecvThread = CreateThread(NULL, 0, network_client_recv_thread, NULL, 0, NULL);
     return true;
@@ -1225,6 +1248,7 @@ static bool audio_engine_init(void) {
 
 static bool audio_engine_start(int capture_dev_idx, int render_dev_idx, bool loopback_mode) {
     if (!g_audio.pEnumerator) return false;
+    ring_buffer_reset();
     g_audio.loopback_test_mode = loopback_mode;
     g_audio.capture_seq = 0;
 
@@ -1365,6 +1389,7 @@ static void audio_engine_cleanup(void) {
 #define IDC_CHK_HUD             213
 #define IDC_EDIT_HUD            214
 #define IDC_STATIC_STATUS       215
+#define IDC_BTN_TEST_MIC        216
 
 typedef struct GuiControls {
     HWND hwndMain;
@@ -1380,6 +1405,7 @@ typedef struct GuiControls {
     HWND hBtnDisconnect;
     HWND hComboMic;
     HWND hComboSpk;
+    HWND hBtnTestMic;
     HWND hChkHud;
     HWND hStaticMic;
     HWND hStaticPeers;
@@ -1389,6 +1415,7 @@ typedef struct GuiControls {
     HFONT hFontMono;
     bool  is_in_call;
     bool  is_host;
+    bool  is_testing_mic;
 } GuiControls;
 
 static GuiControls g_gui;
@@ -1457,6 +1484,151 @@ static void get_local_ip(char *out_ip, size_t max_len) {
     strncpy_s(out_ip, max_len, "127.0.0.1", _TRUNCATE);
 }
 
+// Static GUIDs for UPnP NAT Traversal
+static const GUID LOCAL_CLSID_UPnPNAT = {0xAE1E00AA, 0x3FD5, 0x403C, {0x8A, 0x27, 0x2B, 0xBD, 0xC3, 0x0C, 0xD0, 0xE1}};
+static const GUID LOCAL_IID_IUPnPNAT  = {0xB171C812, 0xCC76, 0x485A, {0x94, 0xD8, 0xB6, 0xB3, 0xA2, 0x79, 0x4E, 0x99}};
+
+static bool upnp_map_port(int port, const char *local_ip) {
+    IUPnPNAT *pNat = NULL;
+    HRESULT hr = CoCreateInstance(&LOCAL_CLSID_UPnPNAT, NULL, CLSCTX_ALL, &LOCAL_IID_IUPnPNAT, (void**)&pNat);
+    if (FAILED(hr) || !pNat) return false;
+
+    IStaticPortMappingCollection *pMappings = NULL;
+    hr = pNat->lpVtbl->get_StaticPortMappingCollection(pNat, &pMappings);
+    if (FAILED(hr) || !pMappings) {
+        pNat->lpVtbl->Release(pNat);
+        return false;
+    }
+
+    wchar_t w_ip[64] = {0};
+    MultiByteToWideChar(CP_ACP, 0, local_ip, -1, w_ip, 64);
+
+    BSTR bstrProto = SysAllocString(L"UDP");
+    BSTR bstrClient = SysAllocString(w_ip);
+    BSTR bstrDesc = SysAllocString(L"preAlphaVoiceChat");
+
+    IStaticPortMapping *pMapping = NULL;
+    hr = pMappings->lpVtbl->Add(pMappings, (long)port, bstrProto, (long)port, bstrClient, VARIANT_TRUE, bstrDesc, &pMapping);
+
+    SysFreeString(bstrProto);
+    SysFreeString(bstrClient);
+    SysFreeString(bstrDesc);
+
+    if (pMapping) pMapping->lpVtbl->Release(pMapping);
+    pMappings->lpVtbl->Release(pMappings);
+    pNat->lpVtbl->Release(pNat);
+
+    return SUCCEEDED(hr);
+}
+
+static void upnp_unmap_port(int port) {
+    IUPnPNAT *pNat = NULL;
+    HRESULT hr = CoCreateInstance(&LOCAL_CLSID_UPnPNAT, NULL, CLSCTX_ALL, &LOCAL_IID_IUPnPNAT, (void**)&pNat);
+    if (FAILED(hr) || !pNat) return;
+
+    IStaticPortMappingCollection *pMappings = NULL;
+    hr = pNat->lpVtbl->get_StaticPortMappingCollection(pNat, &pMappings);
+    if (SUCCEEDED(hr) && pMappings) {
+        BSTR bstrProto = SysAllocString(L"UDP");
+        pMappings->lpVtbl->Remove(pMappings, (long)port, bstrProto);
+        SysFreeString(bstrProto);
+        pMappings->lpVtbl->Release(pMappings);
+    }
+    pNat->lpVtbl->Release(pNat);
+}
+
+#pragma pack(push, 1)
+typedef struct StunHeader {
+    uint16_t msg_type;
+    uint16_t msg_len;
+    uint32_t magic;
+    uint8_t  tx_id[12];
+} StunHeader;
+#pragma pack(pop)
+
+static bool stun_get_public_ip(const char *stun_host, int stun_port, char *out_ip, size_t max_len) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return false;
+
+    DWORD timeout = 600; // 600ms quick discovery timeout
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+    struct hostent *he = gethostbyname(stun_host);
+    if (!he || !he->h_addr_list[0]) {
+        closesocket(s);
+        return false;
+    }
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons((u_short)stun_port);
+    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+
+    StunHeader req;
+    req.msg_type = htons(0x0001); // Binding Request
+    req.msg_len  = htons(0x0000);
+    req.magic    = htonl(0x2112A442);
+    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
+
+    if (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) <= 0) {
+        closesocket(s);
+        return false;
+    }
+
+    uint8_t resp[512];
+    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
+    closesocket(s);
+
+    if (resp_len < 20) return false;
+
+    StunHeader *hdr = (StunHeader*)resp;
+    if (ntohs(hdr->msg_type) != 0x0101) return false; // Binding Success
+    if (ntohl(hdr->magic) != 0x2112A442) return false;
+    if (memcmp(hdr->tx_id, req.tx_id, 12) != 0) return false;
+
+    int offset = 20;
+    while (offset + 4 <= resp_len) {
+        uint16_t attr_type = ntohs(*(uint16_t*)(resp + offset));
+        uint16_t attr_len  = ntohs(*(uint16_t*)(resp + offset + 2));
+        offset += 4;
+
+        if (offset + attr_len > resp_len) break;
+
+        if (attr_type == 0x0020 && attr_len >= 8) { // XOR-MAPPED-ADDRESS
+            uint8_t family = resp[offset + 1];
+            if (family == 0x01) { // IPv4
+                uint32_t xor_ip = *(uint32_t*)(resp + offset + 4);
+                uint32_t real_ip = xor_ip ^ htonl(0x2112A442);
+
+                struct in_addr in;
+                in.s_addr = real_ip;
+                const char *ip_str = inet_ntoa(in);
+                if (ip_str) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    return true;
+                }
+            }
+        } else if (attr_type == 0x0001 && attr_len >= 8) { // MAPPED-ADDRESS
+            uint8_t family = resp[offset + 1];
+            if (family == 0x01) { // IPv4
+                uint32_t real_ip = *(uint32_t*)(resp + offset + 4);
+                struct in_addr in;
+                in.s_addr = real_ip;
+                const char *ip_str = inet_ntoa(in);
+                if (ip_str) {
+                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    return true;
+                }
+            }
+        }
+        offset += attr_len;
+        if (attr_len % 4 != 0) offset += (4 - (attr_len % 4));
+    }
+
+    return false;
+}
+
 static bool parse_invite_string(const char *invite, char *ip, size_t ip_len, int *port, uint16_t *room, char *key, size_t key_len) {
     if (!invite) return false;
     char temp[256];
@@ -1470,10 +1642,10 @@ static bool parse_invite_string(const char *invite, char *ip, size_t ip_len, int
     }
     if (len == 0) return false;
 
-    // Expected format: <ip>:<port>#<room>#<key>
     char *colon = strchr(p, ':');
     if (!colon) return false;
     *colon = '\0';
+
     strncpy_s(ip, ip_len, p, _TRUNCATE);
 
     char *hash1 = strchr(colon + 1, '#');
@@ -1505,22 +1677,41 @@ static void gui_update_hud(void) {
     int active_peers = network_client_get_active_peers();
     char mic_str[64];
     char peer_str[64];
+    char presence_desc[64];
+    const char *status_str = "DISCONNECTED";
+    const char *mic_activity_desc = "IDLE";
 
-    if (g_gui.is_in_call) {
+    if (g_gui.is_testing_mic) {
+        if (snap.mic_peak_level > 600) {
+            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: HEARING VOICE ] (Level: %d)", snap.mic_peak_level);
+            mic_activity_desc = "HEARING VOICE (PLAYBACK)";
+        } else {
+            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: SPEAK TO TEST ] (Silence)");
+            mic_activity_desc = "IDLE (Silence)";
+        }
+        strcpy_s(peer_str, sizeof(peer_str), "[ Loopback Test Mode ]");
+        strcpy_s(presence_desc, sizeof(presence_desc), "Local Mic Loopback Test (Self)");
+        status_str = "MIC LOOPBACK TEST (LOCAL PLAYBACK)";
+    } else if (g_gui.is_in_call) {
         if (snap.mic_peak_level > 600) {
             snprintf(mic_str, sizeof(mic_str), "[ ● MIC: TRANSMITTING ] (Level: %d)", snap.mic_peak_level);
+            mic_activity_desc = "TRANSMITTING VOICE";
         } else {
             snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: IDLE (Silence) ]");
+            mic_activity_desc = "IDLE (Silence)";
         }
 
-        if (active_peers == 0) {
-            snprintf(peer_str, sizeof(peer_str), "Room: Waiting for peers (1 in room)");
-        } else {
-            snprintf(peer_str, sizeof(peer_str), "● Room: %d Peer(s) Online (%d in room)", active_peers, active_peers + 1);
-        }
+        int total_in_room = active_peers + 1;
+        snprintf(peer_str, sizeof(peer_str), "● Room: %d %s in room",
+                 total_in_room, (total_in_room == 1) ? "Person" : "People");
+        snprintf(presence_desc, sizeof(presence_desc), "%d %s in room",
+                 total_in_room, (total_in_room == 1) ? "Person" : "People");
+        status_str = g_gui.is_host ? "HOSTING & STREAMING" : "CONNECTED & STREAMING";
     } else {
         strcpy_s(mic_str, sizeof(mic_str), "[ ○ MIC: OFF ]");
         strcpy_s(peer_str, sizeof(peer_str), "Room: Disconnected");
+        strcpy_s(presence_desc, sizeof(presence_desc), "0 People (Disconnected)");
+        status_str = "DISCONNECTED";
     }
 
     if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, mic_str);
@@ -1537,7 +1728,7 @@ static void gui_update_hud(void) {
     snprintf(hud_text, sizeof(hud_text),
         "================== LIVE TELEMETRY HUD ==================\r\n"
         " Room Status:     %s\r\n"
-        " Room Presence:   %d Peers Online (%d people in call)\r\n"
+        " Room Presence:   %s\r\n"
         " Mic Activity:    [%s] %s\r\n"
         " -------------------------------------------------------\r\n"
         " Bandwidth OUT:   %6.2f KB/s   | Bandwidth IN:    %6.2f KB/s\r\n"
@@ -1547,9 +1738,9 @@ static void gui_update_hud(void) {
         " Ring Buffer:     %2d slot (%4.1f ms) [Target Floor: 10-15 ms]\r\n"
         " AES Crypto Time: %6.2f us / frame (Hardware AES-NI)\r\n"
         "========================================================\r\n",
-        g_gui.is_in_call ? (g_gui.is_host ? "HOSTING & STREAMING" : "CONNECTED & STREAMING") : "DISCONNECTED",
-        active_peers, g_gui.is_in_call ? (active_peers + 1) : 0,
-        mic_bar, (snap.mic_peak_level > 600) ? "TRANSMITTING VOICE" : "IDLE",
+        status_str,
+        presence_desc,
+        mic_bar, mic_activity_desc,
         snap.kb_per_sec_out, snap.kb_per_sec_in,
         snap.last_rtt_ms, snap.jitter_ms,
         (unsigned long long)snap.total_packets_sent, (unsigned long long)snap.total_packets_recv,
@@ -1565,6 +1756,7 @@ static void gui_handle_host(void) {
     char room_str[16] = {0};
     char key[128] = {0};
     char local_ip[64] = {0};
+    char public_ip[64] = {0};
 
     GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
     GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
@@ -1578,40 +1770,54 @@ static void gui_handle_host(void) {
 
     if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
 
-    // Discover LAN/WLAN IP to include in invite
+    // 1. Discover local LAN IP
     get_local_ip(local_ip, sizeof(local_ip));
-    SetWindowTextA(g_gui.hEditIp, local_ip);
 
-    // Format invite string: <local_ip>:<port>#<room>#<key>
+    // 2. Discover public WAN IP via STUN (RFC 5389)
+    gui_update_status("Discovering network topology & STUN public IP...");
+    bool has_public = stun_get_public_ip("stun.l.google.com", 19302, public_ip, sizeof(public_ip));
+    if (!has_public) {
+        has_public = stun_get_public_ip("stun1.l.google.com", 19302, public_ip, sizeof(public_ip));
+    }
+
+    // 3. Attempt UPnP automatic router port mapping
+    bool upnp_ok = upnp_map_port(port, local_ip);
+
+    // 4. Formulate the invite code (unified single address)
+    const char *host_ip = (has_public && strlen(public_ip) > 0) ? public_ip : local_ip;
     char invite_str[256];
-    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", local_ip, port, room_id, key);
+    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", host_ip, port, room_id, key);
+    SetWindowTextA(g_gui.hEditIp, host_ip);
     SetWindowTextA(g_gui.hEditInvite, invite_str);
 
     // Automatically copy invite to clipboard for convenience
     copy_to_clipboard(g_gui.hwndMain, invite_str);
 
-    // 1. Start Relay Server on this machine
+    // 5. Start Relay Server on this machine
     if (!relay_server_start(port)) {
+        if (upnp_ok) upnp_unmap_port(port);
         MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
         return;
     }
 
-    // 2. Initialize crypto with pre-shared key
+    // 6. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize Windows AES-GCM cryptography!", "Error", MB_ICONERROR);
+        if (upnp_ok) upnp_unmap_port(port);
         relay_server_stop();
         return;
     }
 
-    // 3. Connect local UDP client to loopback 127.0.0.1 for zero overhead
+    // 7. Connect local UDP client to loopback 127.0.0.1 for zero overhead
     if (!network_client_connect("127.0.0.1", port, room_id)) {
         MessageBoxA(g_gui.hwndMain, "Failed to connect client to local relay!", "Error", MB_ICONERROR);
         crypto_cleanup();
+        if (upnp_ok) upnp_unmap_port(port);
         relay_server_stop();
         return;
     }
 
-    // 4. Start WASAPI Audio Engine
+    // 8. Start WASAPI Audio Engine
     int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
     int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
 
@@ -1619,6 +1825,7 @@ static void gui_handle_host(void) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
         network_client_disconnect();
         crypto_cleanup();
+        if (upnp_ok) upnp_unmap_port(port);
         relay_server_stop();
         return;
     }
@@ -1629,6 +1836,9 @@ static void gui_handle_host(void) {
     EnableWindow(g_gui.hBtnHost, FALSE);
     EnableWindow(g_gui.hBtnJoin, FALSE);
     EnableWindow(g_gui.hBtnPasteInvite, FALSE);
+    EnableWindow(g_gui.hBtnTestMic, FALSE);
+    EnableWindow(g_gui.hComboMic, FALSE);
+    EnableWindow(g_gui.hComboSpk, FALSE);
     EnableWindow(g_gui.hBtnDisconnect, TRUE);
     EnableWindow(g_gui.hEditIp, FALSE);
     EnableWindow(g_gui.hEditPort, FALSE);
@@ -1636,7 +1846,13 @@ static void gui_handle_host(void) {
     EnableWindow(g_gui.hEditKey, FALSE);
 
     char status_buf[256];
-    snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d | Invite copied to clipboard!", room_id, port);
+    if (upnp_ok) {
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [UPnP Port Opened & Public IP: %s] | Invite copied!", room_id, port, host_ip);
+    } else if (has_public) {
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Public IP: %s] | Invite copied!", room_id, port, host_ip);
+    } else {
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s] | Invite copied!", room_id, port, host_ip);
+    }
     gui_update_status(status_buf);
 }
 
@@ -1695,6 +1911,9 @@ static void gui_handle_join(void) {
     EnableWindow(g_gui.hBtnHost, FALSE);
     EnableWindow(g_gui.hBtnJoin, FALSE);
     EnableWindow(g_gui.hBtnPasteInvite, FALSE);
+    EnableWindow(g_gui.hBtnTestMic, FALSE);
+    EnableWindow(g_gui.hComboMic, FALSE);
+    EnableWindow(g_gui.hComboSpk, FALSE);
     EnableWindow(g_gui.hBtnDisconnect, TRUE);
     EnableWindow(g_gui.hEditIp, FALSE);
     EnableWindow(g_gui.hEditPort, FALSE);
@@ -1702,7 +1921,7 @@ static void gui_handle_join(void) {
     EnableWindow(g_gui.hEditKey, FALSE);
 
     char status_buf[256];
-    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d", room_id, ip, port);
+    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d | Streaming audio...", room_id, ip, port);
     gui_update_status(status_buf);
 }
 
@@ -1759,12 +1978,61 @@ static void gui_handle_paste_invite(void) {
     }
 }
 
+static void gui_handle_test_mic(void) {
+    if (g_gui.is_in_call) {
+        MessageBoxA(g_gui.hwndMain, "Cannot test mic while in an active room call. Disconnect first.", "Info", MB_ICONINFORMATION);
+        return;
+    }
+
+    if (g_gui.is_testing_mic) {
+        // Stop Mic Test
+        audio_engine_stop();
+        g_gui.is_testing_mic = false;
+        SetWindowTextA(g_gui.hBtnTestMic, "Test Mic\n(Loopback)");
+        EnableWindow(g_gui.hBtnHost, TRUE);
+        EnableWindow(g_gui.hBtnJoin, TRUE);
+        EnableWindow(g_gui.hBtnPasteInvite, TRUE);
+        EnableWindow(g_gui.hComboMic, TRUE);
+        EnableWindow(g_gui.hComboSpk, TRUE);
+        if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, "[ ○ MIC: OFF ]");
+        if (g_gui.hStaticPeers) SetWindowTextA(g_gui.hStaticPeers, "Room: Disconnected");
+        gui_update_status("Mic test stopped. Ready to connect or host.");
+    } else {
+        // Start Mic Test
+        int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
+        int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
+
+        if (!audio_engine_start(mic_idx, spk_idx, true)) {
+            MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio devices for test!", "Error", MB_ICONERROR);
+            return;
+        }
+
+        g_gui.is_testing_mic = true;
+        SetWindowTextA(g_gui.hBtnTestMic, "Stop Mic\nTest");
+        EnableWindow(g_gui.hBtnHost, FALSE);
+        EnableWindow(g_gui.hBtnJoin, FALSE);
+        EnableWindow(g_gui.hBtnPasteInvite, FALSE);
+        EnableWindow(g_gui.hComboMic, FALSE);
+        EnableWindow(g_gui.hComboSpk, FALSE);
+        gui_update_status("Testing mic playback... Talk into your mic to hear your voice through your speakers/headphones.");
+    }
+}
+
 static void gui_handle_disconnect(void) {
+    if (g_gui.is_testing_mic) {
+        gui_handle_test_mic();
+        return;
+    }
     if (!g_gui.is_in_call) return;
 
     audio_engine_stop();
     network_client_disconnect();
     if (g_gui.is_host) {
+        char port_str[16] = {0};
+        GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
+        int port = atoi(port_str);
+        if (port <= 0 || port > 65535) port = DEFAULT_RELAY_PORT;
+        upnp_unmap_port(port);
         relay_server_stop();
     }
     crypto_cleanup();
@@ -1775,6 +2043,9 @@ static void gui_handle_disconnect(void) {
     EnableWindow(g_gui.hBtnHost, TRUE);
     EnableWindow(g_gui.hBtnJoin, TRUE);
     EnableWindow(g_gui.hBtnPasteInvite, TRUE);
+    EnableWindow(g_gui.hBtnTestMic, TRUE);
+    EnableWindow(g_gui.hComboMic, TRUE);
+    EnableWindow(g_gui.hComboSpk, TRUE);
     EnableWindow(g_gui.hBtnDisconnect, FALSE);
     EnableWindow(g_gui.hEditIp, TRUE);
     EnableWindow(g_gui.hEditPort, TRUE);
@@ -1850,11 +2121,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 25, 204, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboMic = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 201, 420, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
+                                            110, 201, 290, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
 
             CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 25, 236, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboSpk = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 233, 420, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+                                            110, 233, 290, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+
+            g_gui.hBtnTestMic = CreateWindowA("BUTTON", "Test Mic\n(Loopback)",
+                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_MULTILINE,
+                                              410, 201, 120, 56, hwnd, (HMENU)IDC_BTN_TEST_MIC, NULL, NULL);
 
             // Populate Audio Device Dropdowns
             for (int i = 0; i < g_audio.capture_devices.count; i++) {
@@ -1933,11 +2208,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 gui_handle_copy_invite();
             } else if (id == IDC_BTN_PASTE_INVITE) {
                 gui_handle_paste_invite();
+            } else if (id == IDC_BTN_TEST_MIC) {
+                gui_handle_test_mic();
             }
             break;
         }
 
         case WM_DESTROY: {
+            if (g_gui.is_testing_mic) {
+                gui_handle_test_mic();
+            }
             gui_handle_disconnect();
             KillTimer(hwnd, IDT_TELEMETRY_TIMER);
             if (g_gui.hFontMono) DeleteObject(g_gui.hFontMono);
