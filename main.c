@@ -150,6 +150,11 @@
 #define PACKET_MAGIC            0x56434854 // "VCHT" in hex (Voice Chat)
 #define MAX_PAYLOAD_SIZE        512
 
+#define PKT_TYPE_AUDIO          0
+#define PKT_TYPE_JOIN_REQ       1
+#define PKT_TYPE_JOIN_ACK       2
+#define PKT_TYPE_HEARTBEAT      3
+
 #pragma pack(push, 1)
 typedef struct PacketHeader {
     uint32_t magic;           // PACKET_MAGIC
@@ -158,6 +163,9 @@ typedef struct PacketHeader {
     uint16_t payload_bytes;   // Number of audio bytes in payload
     uint16_t room_id;         // Room identifier
     uint32_t sender_id;       // Unique peer identifier to track who joined the room
+    uint8_t  packet_type;     // PKT_TYPE_*
+    uint8_t  peer_count;      // Current room peer count (in JOIN_ACK)
+    uint16_t reserved;        // Reserved alignment padding
 } PacketHeader;
 
 typedef struct VoicePacket {
@@ -791,6 +799,7 @@ typedef struct RelayServer {
     int                port;
     bool               is_running;
     HANDLE             hThread;
+    uint32_t           host_sender_id;
     RelayClient        clients[MAX_RELAY_CLIENTS];
     CRITICAL_SECTION   cs;
 } RelayServer;
@@ -907,6 +916,32 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
             g_relay.clients[free_idx].last_active_us = now_us;
         }
 
+        // Count how many active clients are in this room
+        int room_clients = 0;
+        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
+            if (g_relay.clients[i].active && g_relay.clients[i].room_id == room_id) {
+                room_clients++;
+            }
+        }
+
+        // If JOIN_REQ, immediately send back JOIN_ACK with host sender ID and room count
+        if (packet.header.packet_type == PKT_TYPE_JOIN_REQ) {
+            WirePacket ack;
+            memset(&ack, 0, sizeof(ack));
+            ack.header.magic = PACKET_MAGIC;
+            ack.header.packet_type = PKT_TYPE_JOIN_ACK;
+            ack.header.room_id = room_id;
+            ack.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
+            ack.header.peer_count = (uint8_t)room_clients;
+            ack.header.timestamp_us = now_us;
+            sendto(g_relay.sock,
+                   (const char*)&ack,
+                   sizeof(PacketHeader),
+                   0,
+                   (struct sockaddr*)&from_addr,
+                   sizeof(from_addr));
+        }
+
         // Forward packet to all other peers in the SAME room
         for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
             if (g_relay.clients[i].active &&
@@ -986,7 +1021,19 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
                              &from_len);
         if (bytes <= 0 || !g_net_client.is_connected) continue;
 
-        if (bytes < (int)sizeof(WirePacket) || packet.header.magic != PACKET_MAGIC) {
+        if (bytes < (int)sizeof(PacketHeader) || packet.header.magic != PACKET_MAGIC) {
+            continue;
+        }
+
+        // Control packets (JOIN_REQ, JOIN_ACK, HEARTBEAT)
+        if (packet.header.packet_type == PKT_TYPE_JOIN_REQ ||
+            packet.header.packet_type == PKT_TYPE_JOIN_ACK ||
+            packet.header.packet_type == PKT_TYPE_HEARTBEAT) {
+            network_client_record_peer(packet.header.sender_id, telemetry_now_us());
+            continue;
+        }
+
+        if (bytes < (int)sizeof(WirePacket)) {
             continue;
         }
 
@@ -1006,7 +1053,6 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
             continue;
         }
 
-        // Auto-lock onto the active responding address (LAN or WAN)
         // Record incoming telemetry metrics
         telemetry_record_recv(bytes, packet.header.sequence, packet.header.timestamp_us);
 
@@ -1019,38 +1065,110 @@ static DWORD WINAPI network_client_recv_thread(LPVOID param) {
     return 0;
 }
 
-static bool network_client_connect(const char *server_ip, int server_port, uint16_t room_id) {
+static bool network_client_connect(const char *wan_ip, const char *lan_ip, int server_port, uint16_t room_id) {
     memset(&g_net_client, 0, sizeof(g_net_client));
     InitializeCriticalSection(&g_net_client.cs);
 
     g_net_client.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (g_net_client.sock == INVALID_SOCKET) return false;
+    if (g_net_client.sock == INVALID_SOCKET) {
+        DeleteCriticalSection(&g_net_client.cs);
+        return false;
+    }
+
+    // Set receive timeout for probing (250ms per probe attempt)
+    DWORD timeout_ms = 250;
+    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
 
     // Assign randomized unique sender ID for this client session
     g_net_client.my_sender_id = (uint32_t)GetCurrentProcessId() ^ (uint32_t)telemetry_now_us();
     if (g_net_client.my_sender_id == 0) g_net_client.my_sender_id = 1;
-
-    // Set receive timeout so thread loop can check is_connected flag
-    DWORD timeout_ms = 100;
-    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-
-    memset(&g_net_client.server_addr, 0, sizeof(g_net_client.server_addr));
-    g_net_client.server_addr.sin_family = AF_INET;
-    g_net_client.server_addr.sin_port = htons((u_short)server_port);
-    inet_pton(AF_INET, server_ip, &g_net_client.server_addr.sin_addr);
-
     g_net_client.room_id = room_id;
+
+    // Prepare candidate addresses
+    struct sockaddr_in wan_addr, lan_addr;
+    bool has_wan = false, has_lan = false;
+
+    if (wan_ip && strlen(wan_ip) > 0) {
+        memset(&wan_addr, 0, sizeof(wan_addr));
+        wan_addr.sin_family = AF_INET;
+        wan_addr.sin_port = htons((u_short)server_port);
+        if (inet_pton(AF_INET, wan_ip, &wan_addr.sin_addr) == 1) {
+            has_wan = true;
+        }
+    }
+
+    if (lan_ip && strlen(lan_ip) > 0 && (!has_wan || strcmp(wan_ip, lan_ip) != 0)) {
+        memset(&lan_addr, 0, sizeof(lan_addr));
+        lan_addr.sin_family = AF_INET;
+        lan_addr.sin_port = htons((u_short)server_port);
+        if (inet_pton(AF_INET, lan_ip, &lan_addr.sin_addr) == 1) {
+            has_lan = true;
+        }
+    }
+
+    if (!has_wan && !has_lan) {
+        closesocket(g_net_client.sock);
+        g_net_client.sock = INVALID_SOCKET;
+        DeleteCriticalSection(&g_net_client.cs);
+        return false;
+    }
+
+    // Prepare JOIN_REQ packet
+    WirePacket req;
+    memset(&req, 0, sizeof(req));
+    req.header.magic = PACKET_MAGIC;
+    req.header.packet_type = PKT_TYPE_JOIN_REQ;
+    req.header.room_id = room_id;
+    req.header.sender_id = g_net_client.my_sender_id;
+    req.header.timestamp_us = telemetry_now_us();
+
+    bool handshake_ok = false;
+    struct sockaddr_in responder_addr;
+    int resp_len = sizeof(responder_addr);
+    WirePacket ack;
+
+    // Probe loop: send JOIN_REQ to candidate addresses, wait for JOIN_ACK
+    // Up to 10 attempts * 250ms = 2.5 seconds max
+    for (int attempt = 0; attempt < 10 && !handshake_ok; attempt++) {
+        if (has_lan) {
+            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
+        }
+        if (has_wan) {
+            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
+        }
+
+        while (true) {
+            resp_len = sizeof(responder_addr);
+            int bytes = recvfrom(g_net_client.sock, (char*)&ack, sizeof(ack), 0, (struct sockaddr*)&responder_addr, &resp_len);
+            if (bytes <= 0) break; // Timeout on recv, proceed to next attempt
+
+            if (bytes >= (int)sizeof(PacketHeader) &&
+                ack.header.magic == PACKET_MAGIC &&
+                ack.header.packet_type == PKT_TYPE_JOIN_ACK &&
+                ack.header.room_id == room_id) {
+                // Handshake success! Lock onto the responding address
+                g_net_client.server_addr = responder_addr;
+                handshake_ok = true;
+                if (ack.header.sender_id != 0) {
+                    network_client_record_peer(ack.header.sender_id, telemetry_now_us());
+                }
+                break;
+            }
+        }
+    }
+
+    if (!handshake_ok) {
+        closesocket(g_net_client.sock);
+        g_net_client.sock = INVALID_SOCKET;
+        DeleteCriticalSection(&g_net_client.cs);
+        return false;
+    }
+
+    // Reset receive timeout to 100ms for continuous audio streaming
+    DWORD stream_timeout_ms = 100;
+    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&stream_timeout_ms, sizeof(stream_timeout_ms));
+
     g_net_client.is_connected = true;
-
-    // Send initial handshake probe
-    WirePacket probe;
-    memset(&probe, 0, sizeof(probe));
-    probe.header.magic = PACKET_MAGIC;
-    probe.header.room_id = room_id;
-    probe.header.sender_id = g_net_client.my_sender_id;
-    probe.header.timestamp_us = telemetry_now_us();
-    sendto(g_net_client.sock, (const char*)&probe, sizeof(probe), 0, (struct sockaddr*)&g_net_client.server_addr, sizeof(g_net_client.server_addr));
-
     g_net_client.hRecvThread = CreateThread(NULL, 0, network_client_recv_thread, NULL, 0, NULL);
     return true;
 }
@@ -1075,7 +1193,9 @@ static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t 
     if (!g_net_client.is_connected || !pcm || bytes == 0) return;
 
     WirePacket packet;
+    memset(&packet, 0, sizeof(packet));
     packet.header.magic = PACKET_MAGIC;
+    packet.header.packet_type = PKT_TYPE_AUDIO;
     packet.header.sequence = seq;
     packet.header.timestamp_us = telemetry_now_us();
     packet.header.payload_bytes = (uint16_t)bytes;
@@ -1629,7 +1749,11 @@ static bool stun_get_public_ip(const char *stun_host, int stun_port, char *out_i
     return false;
 }
 
-static bool parse_invite_string(const char *invite, char *ip, size_t ip_len, int *port, uint16_t *room, char *key, size_t key_len) {
+static bool parse_invite_string(const char *invite,
+                                char *wan_ip, size_t wan_ip_len,
+                                char *lan_ip, size_t lan_ip_len,
+                                int *port, uint16_t *room,
+                                char *key, size_t key_len) {
     if (!invite) return false;
     char temp[256];
     strncpy_s(temp, sizeof(temp), invite, _TRUNCATE);
@@ -1646,7 +1770,19 @@ static bool parse_invite_string(const char *invite, char *ip, size_t ip_len, int
     if (!colon) return false;
     *colon = '\0';
 
-    strncpy_s(ip, ip_len, p, _TRUNCATE);
+    char *plus = strchr(p, '+');
+    if (plus) {
+        *plus = '\0';
+        strncpy_s(wan_ip, wan_ip_len, p, _TRUNCATE);
+        if (lan_ip && lan_ip_len > 0) {
+            strncpy_s(lan_ip, lan_ip_len, plus + 1, _TRUNCATE);
+        }
+    } else {
+        strncpy_s(wan_ip, wan_ip_len, p, _TRUNCATE);
+        if (lan_ip && lan_ip_len > 0) {
+            lan_ip[0] = '\0';
+        }
+    }
 
     char *hash1 = strchr(colon + 1, '#');
     if (hash1) {
@@ -1783,11 +1919,17 @@ static void gui_handle_host(void) {
     // 3. Attempt UPnP automatic router port mapping
     bool upnp_ok = upnp_map_port(port, local_ip);
 
-    // 4. Formulate the invite code (unified single address)
-    const char *host_ip = (has_public && strlen(public_ip) > 0) ? public_ip : local_ip;
+    // 4. Formulate the invite code (transparent WAN+LAN dual addressing)
     char invite_str[256];
-    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", host_ip, port, room_id, key);
-    SetWindowTextA(g_gui.hEditIp, host_ip);
+    if (has_public && strcmp(public_ip, local_ip) != 0) {
+        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s", public_ip, local_ip, port, room_id, key);
+        char display_ip[128];
+        snprintf(display_ip, sizeof(display_ip), "%s (+LAN: %s)", public_ip, local_ip);
+        SetWindowTextA(g_gui.hEditIp, display_ip);
+    } else {
+        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", local_ip, port, room_id, key);
+        SetWindowTextA(g_gui.hEditIp, local_ip);
+    }
     SetWindowTextA(g_gui.hEditInvite, invite_str);
 
     // Automatically copy invite to clipboard for convenience
@@ -1809,13 +1951,14 @@ static void gui_handle_host(void) {
     }
 
     // 7. Connect local UDP client to loopback 127.0.0.1 for zero overhead
-    if (!network_client_connect("127.0.0.1", port, room_id)) {
+    if (!network_client_connect("127.0.0.1", NULL, port, room_id)) {
         MessageBoxA(g_gui.hwndMain, "Failed to connect client to local relay!", "Error", MB_ICONERROR);
         crypto_cleanup();
         if (upnp_ok) upnp_unmap_port(port);
         relay_server_stop();
         return;
     }
+    g_relay.host_sender_id = g_net_client.my_sender_id;
 
     // 8. Start WASAPI Audio Engine
     int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
@@ -1847,22 +1990,22 @@ static void gui_handle_host(void) {
 
     char status_buf[256];
     if (upnp_ok) {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [UPnP Port Opened & Public IP: %s] | Invite copied!", room_id, port, host_ip);
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [UPnP Port Opened & Public IP Ready] | Invite copied!", room_id, port);
     } else if (has_public) {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Public IP: %s] | Invite copied!", room_id, port, host_ip);
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Public IP: %s | LAN: %s] | Invite copied!", room_id, port, public_ip, local_ip);
     } else {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s] | Invite copied!", room_id, port, host_ip);
+        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s] | Invite copied!", room_id, port, local_ip);
     }
     gui_update_status(status_buf);
 }
 
 static void gui_handle_join(void) {
-    char ip[64] = {0};
+    char ip_entry[128] = {0};
     char port_str[16] = {0};
     char room_str[16] = {0};
     char key[128] = {0};
 
-    GetWindowTextA(g_gui.hEditIp, ip, sizeof(ip));
+    GetWindowTextA(g_gui.hEditIp, ip_entry, sizeof(ip_entry));
     GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
     GetWindowTextA(g_gui.hEditRoom, room_str, sizeof(room_str));
     GetWindowTextA(g_gui.hEditKey, key, sizeof(key));
@@ -1873,13 +2016,57 @@ static void gui_handle_join(void) {
     uint16_t room_id = (uint16_t)atoi(room_str);
     if (room_id == 0) room_id = 1;
 
-    if (strlen(ip) == 0) strcpy_s(ip, sizeof(ip), "127.0.0.1");
     if (strlen(key) == 0) strcpy_s(key, sizeof(key), "voicechat2026");
+
+    char wan_ip[64] = {0};
+    char lan_ip[64] = {0};
+
+    // First check if an invite was entered in hEditInvite
+    char invite_in_box[256] = {0};
+    GetWindowTextA(g_gui.hEditInvite, invite_in_box, sizeof(invite_in_box));
+    int parsed_port = port;
+    uint16_t parsed_room = room_id;
+    char parsed_key[128] = {0};
+
+    if (strlen(invite_in_box) > 0 &&
+        parse_invite_string(invite_in_box, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip), &parsed_port, &parsed_room, parsed_key, sizeof(parsed_key))) {
+        port = parsed_port;
+        room_id = parsed_room;
+        if (strlen(parsed_key) > 0) strcpy_s(key, sizeof(key), parsed_key);
+    } else {
+        char *plus = strchr(ip_entry, '+');
+        if (plus) {
+            *plus = '\0';
+            strncpy_s(wan_ip, sizeof(wan_ip), ip_entry, _TRUNCATE);
+            char *p = plus + 1;
+            while (*p == ' ' || *p == '(' || strncmp(p, "LAN:", 4) == 0) {
+                if (strncmp(p, "LAN:", 4) == 0) p += 4;
+                else p++;
+            }
+            char clean_lan[64] = {0};
+            strncpy_s(clean_lan, sizeof(clean_lan), p, _TRUNCATE);
+            char *closing = strchr(clean_lan, ')');
+            if (closing) *closing = '\0';
+            strncpy_s(lan_ip, sizeof(lan_ip), clean_lan, _TRUNCATE);
+        } else {
+            strncpy_s(wan_ip, sizeof(wan_ip), ip_entry, _TRUNCATE);
+        }
+    }
+
+    if (strlen(wan_ip) == 0 && strlen(lan_ip) == 0) {
+        strcpy_s(wan_ip, sizeof(wan_ip), "127.0.0.1");
+    }
 
     // Format invite string into edit box
     char invite_str[256];
-    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", ip, port, room_id, key);
+    if (strlen(lan_ip) > 0) {
+        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s", wan_ip, lan_ip, port, room_id, key);
+    } else {
+        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s", wan_ip, port, room_id, key);
+    }
     SetWindowTextA(g_gui.hEditInvite, invite_str);
+
+    gui_update_status("Probing host with real handshake (zero blind joins)...");
 
     // 1. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
@@ -1887,10 +2074,16 @@ static void gui_handle_join(void) {
         return;
     }
 
-    // 2. Connect UDP network client
-    if (!network_client_connect(ip, port, room_id)) {
-        MessageBoxA(g_gui.hwndMain, "Failed to connect UDP client to host!", "Error", MB_ICONERROR);
+    // 2. Connect UDP network client with real handshake
+    if (!network_client_connect(wan_ip, lan_ip, port, room_id)) {
         crypto_cleanup();
+        MessageBoxA(g_gui.hwndMain,
+            "Failed to connect to host!\r\n\r\n"
+            "No response was received from the host.\r\n"
+            "- Ensure the host has created the room.\r\n"
+            "- If connecting across the Internet, ensure the host has port 7777 open/forwarded.",
+            "Connection Error", MB_ICONERROR);
+        gui_update_status("Connection failed: Host unreachable.");
         return;
     }
 
@@ -1920,8 +2113,11 @@ static void gui_handle_join(void) {
     EnableWindow(g_gui.hEditRoom, FALSE);
     EnableWindow(g_gui.hEditKey, FALSE);
 
+    char resolved_ip[64] = {0};
+    inet_ntop(AF_INET, &g_net_client.server_addr.sin_addr, resolved_ip, sizeof(resolved_ip));
+
     char status_buf[256];
-    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u at %s:%d | Streaming audio...", room_id, ip, port);
+    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u via %s:%d | Streaming audio...", room_id, resolved_ip, port);
     gui_update_status(status_buf);
 }
 
@@ -1955,14 +2151,21 @@ static void gui_handle_paste_invite(void) {
         return;
     }
 
-    char ip[64] = {0};
+    char wan_ip[64] = {0};
+    char lan_ip[64] = {0};
     int port = 7777;
     uint16_t room = 1;
     char key[128] = {0};
 
-    if (parse_invite_string(clip_str, ip, sizeof(ip), &port, &room, key, sizeof(key))) {
+    if (parse_invite_string(clip_str, wan_ip, sizeof(wan_ip), lan_ip, sizeof(lan_ip), &port, &room, key, sizeof(key))) {
         SetWindowTextA(g_gui.hEditInvite, clip_str);
-        SetWindowTextA(g_gui.hEditIp, ip);
+        if (strlen(lan_ip) > 0) {
+            char combined[128];
+            snprintf(combined, sizeof(combined), "%s (+LAN: %s)", wan_ip, lan_ip);
+            SetWindowTextA(g_gui.hEditIp, combined);
+        } else {
+            SetWindowTextA(g_gui.hEditIp, wan_ip);
+        }
 
         char port_str[16], room_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
