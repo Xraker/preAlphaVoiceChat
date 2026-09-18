@@ -906,44 +906,11 @@ typedef struct StunHeader {
 } StunHeader;
 #pragma pack(pop)
 
-static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, char *out_ip, size_t max_len, int *out_port) {
-    DWORD timeout = 800;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    struct hostent *he = gethostbyname(stun_host);
-    if (!he || !he->h_addr_list[0]) {
-        net_log("STUN", "DNS lookup failed for STUN server '%s'", stun_host);
-        return false;
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons((u_short)stun_port);
-    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
-
-    StunHeader req;
-    req.msg_type = htons(0x0001); // RFC 5389 Binding Request
-    req.msg_len  = htons(0x0000);
-    req.magic    = htonl(0x2112A442);
-    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
-
-    if (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) <= 0) {
-        net_log("STUN", "FAIL: sendto failed to %s:%d (WSA error: %d)", stun_host, stun_port, WSAGetLastError());
-        return false;
-    }
-
-    uint8_t resp[512];
-    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
-    if (resp_len < 20) {
-        net_log("STUN", "Timeout or no reply from %s:%d (recv returned %d, WSA err: %d)", stun_host, stun_port, resp_len, WSAGetLastError());
-        return false;
-    }
-
+static bool stun_parse_response_packet(const uint8_t *resp, int resp_len, char *out_ip, size_t max_len, int *out_port) {
+    if (!resp || resp_len < 20) return false;
     StunHeader *hdr = (StunHeader*)resp;
     if (ntohs(hdr->msg_type) != 0x0101) return false;
     if (ntohl(hdr->magic) != 0x2112A442) return false;
-    if (memcmp(hdr->tx_id, req.tx_id, 12) != 0) return false;
 
     int offset = 20;
     while (offset + 4 <= resp_len) {
@@ -964,9 +931,8 @@ static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, 
                 in.s_addr = real_ip;
                 const char *ip_str = inet_ntoa(in);
                 if (ip_str) {
-                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    *out_port = (int)real_port;
-                    net_log("STUN", "Success via %s:%d -> Public Endpoint: %s:%d (XOR-MAPPED)", stun_host, stun_port, out_ip, *out_port);
+                    if (out_ip && max_len > 0) strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    if (out_port) *out_port = (int)real_port;
                     return true;
                 }
             }
@@ -980,15 +946,56 @@ static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, 
                 in.s_addr = real_ip;
                 const char *ip_str = inet_ntoa(in);
                 if (ip_str) {
-                    strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    *out_port = (int)real_port;
-                    net_log("STUN", "Success via %s:%d -> Public Endpoint: %s:%d (MAPPED)", stun_host, stun_port, out_ip, *out_port);
+                    if (out_ip && max_len > 0) strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
+                    if (out_port) *out_port = (int)real_port;
                     return true;
                 }
             }
         }
         offset += attr_len;
         if (attr_len % 4 != 0) offset += (4 - (attr_len % 4));
+    }
+    return false;
+}
+
+static bool stun_send_request(SOCKET s, const char *stun_host, int stun_port) {
+    struct hostent *he = gethostbyname(stun_host);
+    if (!he || !he->h_addr_list[0]) return false;
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons((u_short)stun_port);
+    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+
+    StunHeader req;
+    req.msg_type = htons(0x0001); // RFC 5389 Binding Request
+    req.msg_len  = htons(0x0000);
+    req.magic    = htonl(0x2112A442);
+    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
+
+    return (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) > 0);
+}
+
+static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, char *out_ip, size_t max_len, int *out_port) {
+    DWORD timeout = 800;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+    if (!stun_send_request(s, stun_host, stun_port)) {
+        net_log("STUN", "FAIL: stun_send_request failed to %s:%d (WSA error: %d)", stun_host, stun_port, WSAGetLastError());
+        return false;
+    }
+
+    uint8_t resp[512];
+    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
+    if (resp_len < 20) {
+        net_log("STUN", "Timeout or no reply from %s:%d (recv returned %d, WSA err: %d)", stun_host, stun_port, resp_len, WSAGetLastError());
+        return false;
+    }
+
+    if (stun_parse_response_packet(resp, resp_len, out_ip, max_len, out_port)) {
+        net_log("STUN", "Success via %s:%d -> Public Endpoint: %s:%d", stun_host, stun_port, out_ip, *out_port);
+        return true;
     }
     net_log("STUN", "STUN server %s response did not contain mapped IPv4 address", stun_host);
     return false;
@@ -1072,7 +1079,7 @@ static SOCKET mqtt_connect(const char *host, int port, const char *client_id) {
     serv_addr.sin_port = htons((u_short)port);
     memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
 
-    DWORD to = 2000;
+    DWORD to = 1500;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
 
@@ -1117,8 +1124,16 @@ static SOCKET mqtt_connect(const char *host, int port, const char *client_id) {
 }
 
 static SOCKET mqtt_connect_default(const char *client_id, char *out_broker_used, size_t broker_len) {
-    net_log("MQTT", "Attempting primary broker HiveMQ (broker.hivemq.com:1883)...");
-    SOCKET s = mqtt_connect("broker.hivemq.com", 1883, client_id);
+    net_log("MQTT", "Attempting primary broker EMQX (broker.emqx.io:1883)...");
+    SOCKET s = mqtt_connect("broker.emqx.io", 1883, client_id);
+    if (s != INVALID_SOCKET) {
+        if (out_broker_used && broker_len > 0) {
+            strncpy_s(out_broker_used, broker_len, "broker.emqx.io:1883", _TRUNCATE);
+        }
+        return s;
+    }
+    net_log("MQTT", "EMQX failed. Trying backup broker HiveMQ (broker.hivemq.com:1883)...");
+    s = mqtt_connect("broker.hivemq.com", 1883, client_id);
     if (s != INVALID_SOCKET) {
         if (out_broker_used && broker_len > 0) {
             strncpy_s(out_broker_used, broker_len, "broker.hivemq.com:1883", _TRUNCATE);
@@ -1130,14 +1145,6 @@ static SOCKET mqtt_connect_default(const char *client_id, char *out_broker_used,
     if (s != INVALID_SOCKET) {
         if (out_broker_used && broker_len > 0) {
             strncpy_s(out_broker_used, broker_len, "test.mosquitto.org:1883", _TRUNCATE);
-        }
-        return s;
-    }
-    net_log("MQTT", "Mosquitto failed. Trying backup broker EMQX (broker.emqx.io:1883)...");
-    s = mqtt_connect("broker.emqx.io", 1883, client_id);
-    if (s != INVALID_SOCKET) {
-        if (out_broker_used && broker_len > 0) {
-            strncpy_s(out_broker_used, broker_len, "broker.emqx.io:1883", _TRUNCATE);
         }
         return s;
     }
@@ -1377,6 +1384,23 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
         char from_ip[64] = {0};
         inet_ntop(AF_INET, &from_addr.sin_addr, from_ip, sizeof(from_ip));
         int from_port = ntohs(from_addr.sin_port);
+
+        // Intercept and handle STUN keep-alive responses on the relay socket
+        if (bytes >= 20 &&
+            ntohl(*(uint32_t*)((uint8_t*)&packet + 4)) == 0x2112A442 &&
+            ntohs(*(uint16_t*)&packet) == 0x0101) {
+            char stun_ip[64] = {0};
+            int stun_p = 0;
+            if (stun_parse_response_packet((const uint8_t*)&packet, bytes, stun_ip, sizeof(stun_ip), &stun_p)) {
+                g_relay.stun_port = stun_p;
+                if (!g_relay.upnp_active && stun_p > 0) {
+                    g_relay.public_port = stun_p;
+                }
+                net_log("STUN-RECV", "STUN keepalive verified from %s:%d -> Public Endpoint: %s:%d",
+                        from_ip, from_port, stun_ip, stun_p);
+            }
+            continue; // Handled STUN response
+        }
 
         if (bytes < (int)sizeof(PacketHeader) || packet.header.magic != PACKET_MAGIC) {
             net_log("RELAY-RECV", "Recv %d bytes from %s:%d [DROPPED: invalid magic 0x%08X (expected 0x%08X) or size < %d]",
@@ -1650,25 +1674,11 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             }
         }
 
-        // STUN NAT pinhole keep-alive every 3 seconds
+        // STUN NAT pinhole keep-alive every 3 seconds (async via relay_server_thread)
         static uint64_t last_stun_keepalive_us = 0;
         if (now_us - last_stun_keepalive_us >= 3000000) {
             last_stun_keepalive_us = now_us;
-            int prev_port = g_relay.public_port;
-            int current_stun = g_relay.stun_port ? g_relay.stun_port : g_relay.port;
-            stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &current_stun);
-            g_relay.stun_port = current_stun;
-            if (!g_relay.upnp_active) {
-                g_relay.public_port = current_stun;
-            } else {
-                g_relay.public_port = g_relay.port;
-            }
-            if (g_relay.public_port != prev_port && g_relay.mqtt_sock != INVALID_SOCKET) {
-                net_log("HOST-PUNCH", "Public port changed from %d to %d! Updating host announcement...", prev_port, g_relay.public_port);
-                snprintf(host_payload, sizeof(host_payload), "HOST:%s:%d:%s:%d",
-                         g_relay.public_ip, g_relay.public_port, local_ip, g_relay.port);
-                mqtt_publish(g_relay.mqtt_sock, host_topic, host_payload, true);
-            }
+            stun_send_request(g_relay.sock, "stun.l.google.com", 19302);
         }
 
         // Active hole punching while punch_until_us is active or confirmed peer exists (paced at 250ms, 4 Hz)
@@ -1701,11 +1711,26 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                 struct sockaddr_in target_pub;
                 memset(&target_pub, 0, sizeof(target_pub));
                 target_pub.sin_family = AF_INET;
-                target_pub.sin_port = htons((u_short)peer_pub_port);
                 inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
+
+                // 1. Exact announced STUN port
+                target_pub.sin_port = htons((u_short)peer_pub_port);
                 int sres = sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
                        (struct sockaddr*)&target_pub, sizeof(target_pub));
                 g_relay.total_replies_sent++;
+
+                // 2. Sequential port prediction (+1, +2) for cellular CGNAT
+                if (peer_pub_port < 65535) {
+                    target_pub.sin_port = htons((u_short)(peer_pub_port + 1));
+                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                           (struct sockaddr*)&target_pub, sizeof(target_pub));
+                }
+                if (peer_pub_port < 65534) {
+                    target_pub.sin_port = htons((u_short)(peer_pub_port + 2));
+                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                           (struct sockaddr*)&target_pub, sizeof(target_pub));
+                }
+
                 if (sres <= 0) {
                     net_log("HOST-PUNCH", "Pulse #%u FAIL: sendto %s:%d returned %d (WSA error: %d)",
                             punch_pulse_count, peer_pub_ip, peer_pub_port, sres, WSAGetLastError());
