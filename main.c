@@ -1150,6 +1150,14 @@ typedef struct RelayServer {
     char               public_ip[64];
     bool               upnp_active;
     int                stun_port;
+    uint64_t           total_inbound_probes;
+    uint64_t           total_replies_sent;
+    char               last_probe_ip[64];
+    int                last_probe_port;
+    uint64_t           last_probe_us;
+    bool               mqtt_peer_active;
+    char               mqtt_peer_ip[64];
+    int                mqtt_peer_port;
     RelayClient        clients[MAX_RELAY_CLIENTS];
     struct sockaddr_in confirmed_peer_addr;
     bool               has_confirmed_peer;
@@ -1280,8 +1288,16 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
             }
         }
 
-        // If JOIN_REQ or JOIN_ACK from a remote peer, register confirmed peer address
+        // If from a remote peer, track probe telemetry and register confirmed peer address
         if (from_addr.sin_addr.s_addr != inet_addr("127.0.0.1")) {
+            char sender_ip[64] = {0};
+            inet_ntop(AF_INET, &from_addr.sin_addr, sender_ip, sizeof(sender_ip));
+            int sender_port = ntohs(from_addr.sin_port);
+
+            g_relay.total_inbound_probes++;
+            strncpy_s(g_relay.last_probe_ip, sizeof(g_relay.last_probe_ip), sender_ip, _TRUNCATE);
+            g_relay.last_probe_port = sender_port;
+            g_relay.last_probe_us = now_us;
             g_relay.confirmed_peer_addr = from_addr;
             g_relay.has_confirmed_peer = true;
         }
@@ -1304,6 +1320,7 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
                        (struct sockaddr*)&from_addr,
                        sizeof(from_addr));
             }
+            g_relay.total_replies_sent += 5;
         }
 
         // Forward packet to all other peers in the SAME room
@@ -1429,6 +1446,9 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                         }
                     }
                     has_peer = true;
+                    g_relay.mqtt_peer_active = true;
+                    strncpy_s(g_relay.mqtt_peer_ip, sizeof(g_relay.mqtt_peer_ip), peer_pub_ip, _TRUNCATE);
+                    g_relay.mqtt_peer_port = peer_pub_port;
                     punch_until_us = now_us + 20000000; // Continuous punch for 20 seconds!
 
                     // Send active punching confirmation back on MQTT
@@ -2598,7 +2618,55 @@ static void gui_update_hud(void) {
     for (int b = 0; b < 20; b++) mic_bar[b] = (b < bars) ? '|' : ' ';
     mic_bar[20] = '\0';
 
-    char hud_text[1200];
+    char host_diag_section[350] = {0};
+    if (g_gui.is_host && g_relay.is_running) {
+        char probe_info[128];
+        if (g_relay.total_inbound_probes > 0) {
+            snprintf(probe_info, sizeof(probe_info), "%llu from %s:%d",
+                     (unsigned long long)g_relay.total_inbound_probes,
+                     g_relay.last_probe_ip, g_relay.last_probe_port);
+        } else {
+            strcpy_s(probe_info, sizeof(probe_info), "0 (Waiting for joiner UDP packets...)");
+        }
+
+        char mqtt_info[128];
+        if (g_relay.mqtt_peer_active) {
+            snprintf(mqtt_info, sizeof(mqtt_info), "Peer announced: %s:%d",
+                     g_relay.mqtt_peer_ip, g_relay.mqtt_peer_port);
+        } else {
+            snprintf(mqtt_info, sizeof(mqtt_info), "%s (Listening)",
+                     g_relay.broker_connected ? "Broker Connected" : "Connecting...");
+        }
+
+        snprintf(host_diag_section, sizeof(host_diag_section),
+            " -------------------------------------------------------\r\n"
+            " [HOST RELAY DIAGNOSTICS]\r\n"
+            " Listening Port:  UDP %d (UPnP: %s)\r\n"
+            " Inbound Probes:  %s\r\n"
+            " Responses Sent:  %llu JOIN_ACKs\r\n"
+            " Signaling (MQTT):%s\r\n",
+            g_relay.port,
+            g_relay.upnp_active ? "Active (Forwarded)" : "Disabled/STUN",
+            probe_info,
+            (unsigned long long)g_relay.total_replies_sent,
+            mqtt_info);
+
+        char stat_buf[256];
+        if (g_relay.total_inbound_probes > 0) {
+            snprintf(stat_buf, sizeof(stat_buf), "Active! Received %llu probes from %s:%d (Replying)",
+                     (unsigned long long)g_relay.total_inbound_probes,
+                     g_relay.last_probe_ip, g_relay.last_probe_port);
+        } else if (g_relay.mqtt_peer_active) {
+            snprintf(stat_buf, sizeof(stat_buf), "Signaling received! Peer %s:%d detected. Punching...",
+                     g_relay.mqtt_peer_ip, g_relay.mqtt_peer_port);
+        } else {
+            snprintf(stat_buf, sizeof(stat_buf), "Room active! Listening on UDP %d (UPnP: %s). Waiting for peers...",
+                     g_relay.port, g_relay.upnp_active ? "Mapped" : "STUN");
+        }
+        SetWindowTextA(g_gui.hStaticStatus, stat_buf);
+    }
+
+    char hud_text[1600];
     snprintf(hud_text, sizeof(hud_text),
         "================== LIVE TELEMETRY HUD ==================\r\n"
         " Room Status:     %s\r\n"
@@ -2611,6 +2679,7 @@ static void gui_update_hud(void) {
         " Packet Loss:     %6.2f %%      | Out-of-Order:    %6llu\r\n"
         " Ring Buffer:     %2d slot (%4.1f ms) [Target Floor: 10-15 ms]\r\n"
         " AES Crypto Time: %6.2f us / frame (Hardware AES-NI)\r\n"
+        "%s"
         "========================================================\r\n",
         status_str,
         presence_desc,
@@ -2620,7 +2689,8 @@ static void gui_update_hud(void) {
         (unsigned long long)snap.total_packets_sent, (unsigned long long)snap.total_packets_recv,
         snap.packet_loss_pct, (unsigned long long)snap.out_of_order_count,
         snap.current_buffer_frames, snap.current_buffer_ms,
-        snap.crypto_overhead_us);
+        snap.crypto_overhead_us,
+        host_diag_section);
 
     SetWindowTextA(g_gui.hEditHud, hud_text);
 }
