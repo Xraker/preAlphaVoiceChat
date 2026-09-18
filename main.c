@@ -1149,6 +1149,8 @@ typedef struct RelayServer {
     int                public_port;
     char               public_ip[64];
     RelayClient        clients[MAX_RELAY_CLIENTS];
+    struct sockaddr_in confirmed_peer_addr;
+    bool               has_confirmed_peer;
     CRITICAL_SECTION   cs;
 } RelayServer;
 
@@ -1276,7 +1278,13 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
             }
         }
 
-        // If JOIN_REQ, immediately send back JOIN_ACK with host sender ID and room count
+        // If JOIN_REQ or JOIN_ACK from a remote peer, register confirmed peer address
+        if (from_addr.sin_addr.s_addr != inet_addr("127.0.0.1")) {
+            g_relay.confirmed_peer_addr = from_addr;
+            g_relay.has_confirmed_peer = true;
+        }
+
+        // If JOIN_REQ, immediately send back a burst of 5 JOIN_ACK packets with host sender ID and room count
         if (packet.header.packet_type == PKT_TYPE_JOIN_REQ) {
             WirePacket ack;
             memset(&ack, 0, sizeof(ack));
@@ -1286,12 +1294,14 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
             ack.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
             ack.header.peer_count = (uint8_t)room_clients;
             ack.header.timestamp_us = now_us;
-            sendto(g_relay.sock,
-                   (const char*)&ack,
-                   sizeof(PacketHeader),
-                   0,
-                   (struct sockaddr*)&from_addr,
-                   sizeof(from_addr));
+            for (int b = 0; b < 5; b++) {
+                sendto(g_relay.sock,
+                       (const char*)&ack,
+                       sizeof(PacketHeader),
+                       0,
+                       (struct sockaddr*)&from_addr,
+                       sizeof(from_addr));
+            }
         }
 
         // Forward packet to all other peers in the SAME room
@@ -1427,8 +1437,21 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             }
         }
 
-        // Active continuous hole punching while punch_until_us is active (pulsed every 25ms)
-        if (has_peer && now_us < punch_until_us && (now_us - last_punch_pulse_us >= 25000)) {
+        // STUN NAT pinhole keep-alive every 3 seconds
+        static uint64_t last_stun_keepalive_us = 0;
+        if (now_us - last_stun_keepalive_us >= 3000000) {
+            last_stun_keepalive_us = now_us;
+            int prev_port = g_relay.public_port;
+            stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &g_relay.public_port);
+            if (g_relay.public_port != prev_port && g_relay.mqtt_sock != INVALID_SOCKET) {
+                snprintf(host_payload, sizeof(host_payload), "HOST:%s:%d:%s:%d",
+                         g_relay.public_ip, g_relay.public_port, local_ip, g_relay.port);
+                mqtt_publish(g_relay.mqtt_sock, host_topic, host_payload, true);
+            }
+        }
+
+        // Active continuous hole punching while punch_until_us is active or confirmed peer exists (pulsed every 25ms)
+        if ((has_peer || g_relay.has_confirmed_peer) && (now_us - last_punch_pulse_us >= 25000)) {
             last_punch_pulse_us = now_us;
             WirePacket punch;
             memset(&punch, 0, sizeof(punch));
@@ -1438,12 +1461,18 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             punch.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
             punch.header.timestamp_us = now_us;
 
+            // 1. If we have received an actual packet from the peer, punch DIRECTLY to their confirmed address!
+            if (g_relay.has_confirmed_peer) {
+                sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
+                       (struct sockaddr*)&g_relay.confirmed_peer_addr, sizeof(g_relay.confirmed_peer_addr));
+            }
+
             struct sockaddr_in target_pub, target_lan, target_loop;
             memset(&target_pub, 0, sizeof(target_pub));
             memset(&target_lan, 0, sizeof(target_lan));
             memset(&target_loop, 0, sizeof(target_loop));
 
-            if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0) {
+            if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0 && now_us < punch_until_us) {
                 target_pub.sin_family = AF_INET;
                 inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
 
@@ -1458,7 +1487,7 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                 }
             }
 
-            if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0) {
+            if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0 && now_us < punch_until_us) {
                 target_lan.sin_family = AF_INET;
                 target_lan.sin_port = htons((u_short)peer_lan_port);
                 inet_pton(AF_INET, peer_lan_ip, &target_lan.sin_addr);
@@ -1804,7 +1833,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             }
         }
 
-        // Probing LAN
+        // Probing LAN (only if LAN IP is specified and different from WAN)
         if (has_lan) {
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
         }
@@ -1820,13 +1849,24 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             }
         }
 
-        // Probing Loopback
-        sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&loop_addr, sizeof(loop_addr));
+        // Probing Loopback ONLY if connecting to local host
+        if (wan_ip && strcmp(wan_ip, "127.0.0.1") == 0) {
+            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&loop_addr, sizeof(loop_addr));
+        }
 
-        while (true) {
+        // Resilient receive loop: wait up to 120ms per attempt and ignore ICMP port unreachables
+        uint64_t probe_start_us = telemetry_now_us();
+        while (telemetry_now_us() - probe_start_us < 120000) {
             resp_len = sizeof(responder_addr);
             int bytes = recvfrom(g_net_client.sock, (char*)&ack, sizeof(ack), 0, (struct sockaddr*)&responder_addr, &resp_len);
-            if (bytes <= 0) break; // Timeout on recv, proceed to next attempt
+            if (bytes <= 0) {
+                int err = WSAGetLastError();
+                if (err == WSAECONNRESET || err == WSAEWOULDBLOCK) {
+                    Sleep(2);
+                    continue; // Transient ICMP unreachable from wrong port burst, keep waiting!
+                }
+                break; // True timeout (WSAETIMEDOUT)
+            }
 
             if (bytes >= (int)sizeof(PacketHeader) &&
                 ack.header.magic == PACKET_MAGIC &&
@@ -1840,15 +1880,15 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                     network_client_record_peer(ack.header.sender_id, telemetry_now_us());
                 }
 
-                // If host sent JOIN_REQ, reply with JOIN_ACK to ensure host has our address too
-                if (ack.header.packet_type == PKT_TYPE_JOIN_REQ) {
-                    WirePacket reply;
-                    memset(&reply, 0, sizeof(reply));
-                    reply.header.magic = PACKET_MAGIC;
-                    reply.header.packet_type = PKT_TYPE_JOIN_ACK;
-                    reply.header.room_id = room_id;
-                    reply.header.sender_id = g_net_client.my_sender_id;
-                    reply.header.timestamp_us = telemetry_now_us();
+                // Send burst of 3 confirmation ACKs to host so host's NAT pinhole locks instantly
+                WirePacket reply;
+                memset(&reply, 0, sizeof(reply));
+                reply.header.magic = PACKET_MAGIC;
+                reply.header.packet_type = PKT_TYPE_JOIN_ACK;
+                reply.header.room_id = room_id;
+                reply.header.sender_id = g_net_client.my_sender_id;
+                reply.header.timestamp_us = telemetry_now_us();
+                for (int b = 0; b < 3; b++) {
                     sendto(g_net_client.sock, (const char*)&reply, sizeof(PacketHeader), 0,
                            (struct sockaddr*)&responder_addr, sizeof(responder_addr));
                 }
