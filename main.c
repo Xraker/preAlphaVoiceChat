@@ -904,6 +904,20 @@ static void disable_udp_connreset(SOCKET s) {
     WSAIoctl(s, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 }
 
+// Cryptographically strong session token generator
+static void generate_session_token(char *out_token, size_t max_len) {
+    uint32_t rnd = 0;
+    if (BCryptGenRandom(NULL, (PUCHAR)&rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0 && rnd != 0) {
+        snprintf(out_token, max_len, "%08X", (unsigned)rnd);
+    } else {
+        uint64_t perf = 0;
+        LARGE_INTEGER qpc;
+        if (QueryPerformanceCounter(&qpc)) perf = (uint64_t)qpc.QuadPart;
+        rnd = (uint32_t)(perf ^ ((uint64_t)GetCurrentProcessId() << 16) ^ (uint64_t)GetTickCount());
+        snprintf(out_token, max_len, "%08X", (unsigned)rnd);
+    }
+}
+
 // Traversal Diagnostics Tracker for Transparent Connection Error Reporting
 typedef struct TraversalDiagnostics {
     bool socket_created;
@@ -916,6 +930,7 @@ typedef struct TraversalDiagnostics {
     char broker_host[64];
     bool signaling_announced;
     char signaling_topic[64];
+    bool host_acknowledged;
     int  probes_sent;
     bool join_ack_received;
     int  last_wsa_error;
@@ -997,6 +1012,13 @@ static SOCKET mqtt_connect_default(const char *client_id, char *out_broker_used,
         }
         return s;
     }
+    s = mqtt_connect("broker.emqx.io", 1883, client_id);
+    if (s != INVALID_SOCKET) {
+        if (out_broker_used && broker_len > 0) {
+            strncpy_s(out_broker_used, broker_len, "broker.emqx.io:1883", _TRUNCATE);
+        }
+        return s;
+    }
     return INVALID_SOCKET;
 }
 
@@ -1055,6 +1077,7 @@ static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, siz
     }
     if (p_start == -1) return false;
 
+    int qos = (pkt[p_start] >> 1) & 0x03;
     int idx = p_start + 1;
     int rem_len = 0;
     int mult = 1;
@@ -1077,8 +1100,13 @@ static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, siz
     }
     idx += t_len;
 
-    int pay_len = (p_start + 1 + 1 + rem_len) - idx;
-    if (pay_len < 0 || idx + pay_len > len) {
+    if (qos > 0) {
+        idx += 2; // skip 2-byte Packet Identifier for QoS 1 or 2
+    }
+
+    int pay_len = rem_len - 2 - t_len - (qos > 0 ? 2 : 0);
+    if (pay_len < 0) return false;
+    if (idx + pay_len > len) {
         pay_len = len - idx;
     }
     if (pay_len < 0) return false;
@@ -1287,14 +1315,14 @@ static DWORD WINAPI relay_server_thread(LPVOID param) {
 
 static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
     (void)param;
+    char join_topic[64];
+    snprintf(join_topic, sizeof(join_topic), "vchat/%s/join", g_relay.session_token);
+
     char peer_topic[64];
     snprintf(peer_topic, sizeof(peer_topic), "vchat/%s/peer", g_relay.session_token);
 
     char host_topic[64];
     snprintf(host_topic, sizeof(host_topic), "vchat/%s/host", g_relay.session_token);
-
-    char host_client_id[64];
-    snprintf(host_client_id, sizeof(host_client_id), "vch_%08x", (uint32_t)telemetry_now_us());
 
     char local_ip[64] = {0};
     get_local_ip(local_ip, sizeof(local_ip));
@@ -1309,18 +1337,24 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
     int peer_lan_port = 0;
     bool has_peer = false;
     uint64_t punch_until_us = 0;
+    uint64_t last_punch_pulse_us = 0;
 
     while (g_relay.is_running) {
         // Connect / Reconnect if needed
         if (g_relay.mqtt_sock == INVALID_SOCKET) {
+            char host_client_id[64];
+            snprintf(host_client_id, sizeof(host_client_id), "vch_%08x_%04x",
+                     (uint32_t)telemetry_now_us(), (uint16_t)(rand() & 0xFFFF));
+
             char broker_used[64] = {0};
             g_relay.mqtt_sock = mqtt_connect_default(host_client_id, broker_used, sizeof(broker_used));
             if (g_relay.mqtt_sock != INVALID_SOCKET) {
                 g_relay.broker_connected = true;
+                mqtt_subscribe(g_relay.mqtt_sock, join_topic);
                 mqtt_subscribe(g_relay.mqtt_sock, peer_topic);
-                // Announce host with RETAIN = 1 so joiner gets it immediately
+                // Announce host with retain = true so joiner gets current endpoints immediately
                 mqtt_publish(g_relay.mqtt_sock, host_topic, host_payload, true);
-                DWORD recv_to = 200;
+                DWORD recv_to = 50; // Short 50ms timeout for non-blocking loop
                 setsockopt(g_relay.mqtt_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_to, sizeof(recv_to));
                 last_ping_us = telemetry_now_us();
             } else {
@@ -1334,19 +1368,22 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
         int bytes = recv(g_relay.mqtt_sock, (char*)buf, sizeof(buf), 0);
         if (!g_relay.is_running) break;
 
-        if (bytes == 0) {
-            // Connection closed by broker, reconnect
-            closesocket(g_relay.mqtt_sock);
-            g_relay.mqtt_sock = INVALID_SOCKET;
-            g_relay.broker_connected = false;
-            Sleep(500);
-            continue;
+        if (bytes <= 0) {
+            int err = (bytes < 0) ? WSAGetLastError() : 0;
+            if (bytes == 0 || (err != WSAETIMEDOUT && err != WSAEWOULDBLOCK)) {
+                // Connection closed or reset by broker -> clean up and reconnect
+                closesocket(g_relay.mqtt_sock);
+                g_relay.mqtt_sock = INVALID_SOCKET;
+                g_relay.broker_connected = false;
+                Sleep(250);
+                continue;
+            }
         }
 
         uint64_t now_us = telemetry_now_us();
 
-        // Send PINGREQ every 15 seconds to keep connection alive permanently
-        if (now_us - last_ping_us >= 15000000) {
+        // Send PINGREQ every 10 seconds to keep connection alive permanently
+        if (now_us - last_ping_us >= 10000000) {
             mqtt_send_ping(g_relay.mqtt_sock);
             last_ping_us = now_us;
         }
@@ -1355,7 +1392,7 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
             char r_topic[64] = {0};
             char r_payload[256] = {0};
             if (mqtt_parse_publish(buf, bytes, r_topic, sizeof(r_topic), r_payload, sizeof(r_payload))) {
-                if (strncmp(r_payload, "PEER:", 5) == 0) {
+                if (strncmp(r_payload, "JOIN:", 5) == 0 || strncmp(r_payload, "PEER:", 5) == 0) {
                     char *p1 = r_payload + 5;
                     char *c1 = strchr(p1, ':');
                     if (c1) {
@@ -1381,12 +1418,18 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                     }
                     has_peer = true;
                     punch_until_us = now_us + 20000000; // Continuous punch for 20 seconds!
+
+                    // Send active punching confirmation back on MQTT
+                    char ack_pay[128];
+                    snprintf(ack_pay, sizeof(ack_pay), "PUNCHING:%s:%d", g_relay.public_ip, g_relay.public_port);
+                    mqtt_publish(g_relay.mqtt_sock, host_topic, ack_pay, false);
                 }
             }
         }
 
-        // Active continuous hole punching while punch_until_us is active
-        if (has_peer && now_us < punch_until_us) {
+        // Active continuous hole punching while punch_until_us is active (pulsed every 25ms)
+        if (has_peer && now_us < punch_until_us && (now_us - last_punch_pulse_us >= 25000)) {
+            last_punch_pulse_us = now_us;
             WirePacket punch;
             memset(&punch, 0, sizeof(punch));
             punch.header.magic = PACKET_MAGIC;
@@ -1404,8 +1447,8 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
                 target_pub.sin_family = AF_INET;
                 inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
 
-                // Burst across target_port - 2 to target_port + 2 (covers port shifts!)
-                for (int p_off = -2; p_off <= 2; p_off++) {
+                // Burst across target_port - 10 to target_port + 40 (covers mobile/CGNAT port shifts!)
+                for (int p_off = -10; p_off <= 40; p_off++) {
                     int p_test = peer_pub_port + p_off;
                     if (p_test > 0 && p_test <= 65535) {
                         target_pub.sin_port = htons((u_short)p_test);
@@ -1432,6 +1475,7 @@ static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
     }
 
     if (g_relay.mqtt_sock != INVALID_SOCKET) {
+        mqtt_publish(g_relay.mqtt_sock, host_topic, "", true); // Clear retained topic
         closesocket(g_relay.mqtt_sock);
         g_relay.mqtt_sock = INVALID_SOCKET;
     }
@@ -1624,28 +1668,42 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
 
     // 3. Connect to MQTT signaling broker & publish endpoint
     SOCKET join_mqtt = INVALID_SOCKET;
+    char host_topic[64] = {0};
+    char join_topic[64] = {0};
+    char peer_topic[64] = {0};
+
     if (session_token && strlen(session_token) > 0) {
         strncpy_s(g_net_client.session_token, sizeof(g_net_client.session_token), session_token, _TRUNCATE);
+        snprintf(join_topic, sizeof(join_topic), "vchat/%s/join", session_token);
+        snprintf(peer_topic, sizeof(peer_topic), "vchat/%s/peer", session_token);
+        snprintf(host_topic, sizeof(host_topic), "vchat/%s/host", session_token);
+        strncpy_s(g_join_diag.signaling_topic, sizeof(g_join_diag.signaling_topic), join_topic, _TRUNCATE);
+
         char client_id[64];
-        snprintf(client_id, sizeof(client_id), "vcj_%08x", (uint32_t)telemetry_now_us());
+        snprintf(client_id, sizeof(client_id), "vcj_%08x_%04x",
+                 (uint32_t)telemetry_now_us(), (uint16_t)(rand() & 0xFFFF));
 
         join_mqtt = mqtt_connect_default(client_id, g_join_diag.broker_host, sizeof(g_join_diag.broker_host));
         if (join_mqtt != INVALID_SOCKET) {
             g_join_diag.broker_connected = true;
-            char topic[64];
-            snprintf(topic, sizeof(topic), "vchat/%s/peer", session_token);
-            strncpy_s(g_join_diag.signaling_topic, sizeof(g_join_diag.signaling_topic), topic, _TRUNCATE);
+            // Subscribe to host announcements
+            mqtt_subscribe(join_mqtt, host_topic);
 
             char payload[128];
-            snprintf(payload, sizeof(payload), "PEER:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
-            if (mqtt_publish(join_mqtt, topic, payload, true)) {
-                g_join_diag.signaling_announced = true;
-            }
+            snprintf(payload, sizeof(payload), "JOIN:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
+            // Publish to both join and peer topics without retain so host only gets live requests
+            mqtt_publish(join_mqtt, join_topic, payload, false);
+            mqtt_publish(join_mqtt, peer_topic, payload, false);
+            g_join_diag.signaling_announced = true;
+
+            // Short 10ms receive timeout on MQTT socket for checking host status
+            DWORD mqtt_to = 10;
+            setsockopt(join_mqtt, SOL_SOCKET, SO_RCVTIMEO, (const char*)&mqtt_to, sizeof(mqtt_to));
         }
     }
 
-    // Set receive timeout for probing (150ms per probe attempt)
-    DWORD timeout_ms = 150;
+    // Set receive timeout for probing (100ms per probe attempt)
+    DWORD timeout_ms = 100;
     setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
 
     // Assign randomized unique sender ID for this client session
@@ -1701,18 +1759,49 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
     int resp_len = sizeof(responder_addr);
     WirePacket ack;
 
-    // Probe loop: send JOIN_REQ with adjacent port bursting (-2 to +2), wait for JOIN_ACK
-    // 40 attempts * 150ms = 6.0 seconds maximum
-    for (int attempt = 0; attempt < 40 && !handshake_ok; attempt++) {
+    // Probe loop: send JOIN_REQ with adjacent port bursting (-5 to +5), wait for JOIN_ACK
+    // 100 attempts * 100ms = 10.0 seconds maximum
+    for (int attempt = 0; attempt < 100 && !handshake_ok; attempt++) {
         g_join_diag.probes_sent++;
 
-        // Re-publish announcement every 5 attempts to ensure delivery
-        if (join_mqtt != INVALID_SOCKET && (attempt % 5 == 0) && session_token && strlen(session_token) > 0) {
-            char topic[64];
-            snprintf(topic, sizeof(topic), "vchat/%s/peer", session_token);
-            char payload[128];
-            snprintf(payload, sizeof(payload), "PEER:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
-            mqtt_publish(join_mqtt, topic, payload, true);
+        // Check if Host announced its endpoint or acknowledged on MQTT
+        if (join_mqtt != INVALID_SOCKET) {
+            uint8_t mbuf[512] = {0};
+            int r = recv(join_mqtt, (char*)mbuf, sizeof(mbuf), 0);
+            if (r > 0) {
+                char r_top[64] = {0};
+                char r_pay[256] = {0};
+                if (mqtt_parse_publish(mbuf, r, r_top, sizeof(r_top), r_pay, sizeof(r_pay))) {
+                    if (strncmp(r_pay, "HOST:", 5) == 0 || strncmp(r_pay, "PUNCHING:", 9) == 0) {
+                        g_join_diag.host_acknowledged = true;
+                        if (strncmp(r_pay, "HOST:", 5) == 0) {
+                            // HOST:<pub_ip>:<pub_port>:<lan_ip>:<port>
+                            char *hp1 = r_pay + 5;
+                            char *hc1 = strchr(hp1, ':');
+                            if (hc1) {
+                                *hc1 = '\0';
+                                char *hp2 = hc1 + 1;
+                                char *hc2 = strchr(hp2, ':');
+                                if (hc2) {
+                                    *hc2 = '\0';
+                                    int h_port = atoi(hp2);
+                                    if (h_port > 0 && h_port <= 65535) {
+                                        server_port = h_port;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-publish announcement every 10 attempts (~1 sec) to ensure delivery
+            if ((attempt % 10 == 0) && session_token && strlen(session_token) > 0) {
+                char payload[128];
+                snprintf(payload, sizeof(payload), "JOIN:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
+                mqtt_publish(join_mqtt, join_topic, payload, false);
+                mqtt_publish(join_mqtt, peer_topic, payload, false);
+            }
         }
 
         // Probing LAN
@@ -1720,9 +1809,9 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
             sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
         }
 
-        // Probing WAN with adjacent port bursting (port - 2 to port + 2)
+        // Probing WAN with adjacent port bursting (port - 5 to port + 5)
         if (has_wan) {
-            for (int p_off = -2; p_off <= 2; p_off++) {
+            for (int p_off = -5; p_off <= 5; p_off++) {
                 int p_test = server_port + p_off;
                 if (p_test > 0 && p_test <= 65535) {
                     wan_addr.sin_port = htons((u_short)p_test);
@@ -1741,7 +1830,7 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
 
             if (bytes >= (int)sizeof(PacketHeader) &&
                 ack.header.magic == PACKET_MAGIC &&
-                ack.header.packet_type == PKT_TYPE_JOIN_ACK &&
+                (ack.header.packet_type == PKT_TYPE_JOIN_ACK || ack.header.packet_type == PKT_TYPE_JOIN_REQ) &&
                 (ack.header.room_id == room_id || ack.header.room_id == 0)) {
                 // Handshake success! Lock onto the responding address
                 g_net_client.server_addr = responder_addr;
@@ -1749,6 +1838,19 @@ static bool network_client_connect(const char *wan_ip, const char *lan_ip, int s
                 g_join_diag.join_ack_received = true;
                 if (ack.header.sender_id != 0) {
                     network_client_record_peer(ack.header.sender_id, telemetry_now_us());
+                }
+
+                // If host sent JOIN_REQ, reply with JOIN_ACK to ensure host has our address too
+                if (ack.header.packet_type == PKT_TYPE_JOIN_REQ) {
+                    WirePacket reply;
+                    memset(&reply, 0, sizeof(reply));
+                    reply.header.magic = PACKET_MAGIC;
+                    reply.header.packet_type = PKT_TYPE_JOIN_ACK;
+                    reply.header.room_id = room_id;
+                    reply.header.sender_id = g_net_client.my_sender_id;
+                    reply.header.timestamp_us = telemetry_now_us();
+                    sendto(g_net_client.sock, (const char*)&reply, sizeof(PacketHeader), 0,
+                           (struct sockaddr*)&responder_addr, sizeof(responder_addr));
                 }
                 break;
             }
@@ -2489,8 +2591,7 @@ static void gui_handle_host(void) {
 
     // 2. Generate random 8-character session token for zero-config hole punching
     char session_token[32];
-    snprintf(session_token, sizeof(session_token), "%04X%04X",
-             (unsigned)(rand() & 0xFFFF), (unsigned)(rand() & 0xFFFF));
+    generate_session_token(session_token, sizeof(session_token));
 
     // 3. Attempt UPnP automatic router port mapping as helper
     bool upnp_ok = upnp_map_port(port, local_ip);
@@ -2698,12 +2799,12 @@ static void gui_handle_join(void) {
             "[%s] 2. STUN Discovery: Public %s:%d (Google STUN)\r\n"
             "[%s] 3. Signaling Broker: %s\r\n"
             "[%s] 4. Peer Announcement: %s (%s)\r\n"
-            "[FAIL] 5. P2P Direct UDP Hole Punch: Sent %d probes, received 0 responses\r\n"
+            "[%s] 5. Host Signaling Ack: %s\r\n"
+            "[FAIL] 6. P2P Direct UDP Hole Punch: Sent %d probes, received 0 responses\r\n"
             "       - Target Host: %s:%d (LAN: %s)\r\n"
             "       - Last Winsock Status: Error %d (%s)\r\n\r\n"
             "Diagnosis:\r\n"
-            "- Host has not started the room yet, or invite code was expired.\r\n"
-            "- If both are online, one router may have strict symmetric NAT blocking direct P2P.\r\n\r\n"
+            "%s\r\n\r\n"
             "Please confirm the host clicked 'Host Room' and retry.",
             g_join_diag.socket_created ? "OK" : "FAIL",
             g_join_diag.local_port,
@@ -2715,10 +2816,15 @@ static void gui_handle_join(void) {
             g_join_diag.signaling_announced ? "OK" : "FAIL",
             g_join_diag.signaling_topic[0] ? g_join_diag.signaling_topic : "N/A",
             g_join_diag.signaling_announced ? "Published" : "Not sent",
+            g_join_diag.host_acknowledged ? "OK" : "WAIT",
+            g_join_diag.host_acknowledged ? "Host confirmed alive & punching" : "Host did not answer on signaling topic",
             g_join_diag.probes_sent,
             wan_ip, port, (lan_ip[0] != '\0') ? lan_ip : "N/A",
             g_join_diag.last_wsa_error,
-            wsa_desc
+            wsa_desc,
+            !g_join_diag.host_acknowledged
+                ? "- Host has not started the room yet, or invite code was expired.\r\n- Host and Joiner may be using different signaling brokers."
+                : "- Host is confirmed online on signaling, but UDP packets were blocked.\r\n- One router has strict symmetric NAT or a firewall blocking incoming UDP."
         );
 
         MessageBoxA(g_gui.hwndMain, err_msg, "Connection Diagnostics", MB_ICONERROR);
@@ -3208,6 +3314,15 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     telemetry_init();
     ring_buffer_init();
     audio_engine_init();
+
+    // 2b. Seed C runtime pseudo-random generator with high entropy
+    unsigned int rseed = 0;
+    if (BCryptGenRandom(NULL, (PUCHAR)&rseed, sizeof(rseed), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0 || rseed == 0) {
+        LARGE_INTEGER qpc;
+        QueryPerformanceCounter(&qpc);
+        rseed = (unsigned int)(qpc.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 16) ^ (uint64_t)GetTickCount());
+    }
+    srand(rseed);
 
     // 3. Register Win32 Window Class
     WNDCLASSEXA wc;
