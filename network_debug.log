@@ -1,449 +1,86 @@
-[14:45:17.029] [SYSTEM      ] ==========================================================
-[14:45:17.030] [SYSTEM      ]  preAlphaVoiceChat Network Diagnostics Engine ACTIVE
-[14:45:17.030] [SYSTEM      ]  Master toggle 'ENABLE_VERBOSE_NET_LOG': 1 (Verbose)
-[14:45:17.030] [SYSTEM      ]  Recording all events to 'network_debug.log'
-[14:45:17.030] [SYSTEM      ] ==========================================================
-[14:45:21.748] [GUI         ] HOST ROOM clicked: LAN=192.168.1.4, Port=7777, Room=1, Key='voicechat2026', Token=4C910D12
-[14:45:21.748] [GUI         ] Invite code generated: '192.168.1.4:7777#1#voicechat2026#4C910D12'
-[14:45:21.750] [ICE         ] Starting ICE session (is_host=1, room_id=1, token='4C910D12')...
-[14:45:21.750] [JUICE       ] [DEBUG] ice.c:173: Created local description: ufrag="fv8i", pwd="GNKTCn/DM9rhpNeeSg0u9c"
-[14:45:21.750] [JUICE       ] [DEBUG] agent.c:508: Assuming controlling mode
-[14:45:21.750] [ICE         ] Local SDP generated successfully (80 bytes)
-[14:45:21.750] [JUICE       ] [INFO] agent.c:1253: Changing state to gathering
-[14:45:21.750] [ICE         ] State changed -> gathering (1)
-[14:45:21.750] [JUICE       ] [DEBUG] conn.c:145: Creating connection
-[14:45:21.750] [JUICE       ] [DEBUG] udp.c:166: Opening UDP socket for IPv6 family
-[14:45:21.750] [JUICE       ] [DEBUG] udp.c:96: UDP socket bound to any:55513
-[14:45:21.750] [JUICE       ] [DEBUG] conn_thread.c:181: Starting connection thread
-[14:45:21.751] [JUICE       ] [DEBUG] agent.c:316: Gathered host candidate: a=candidate:1 1 UDP 2114977791 192.168.1.4 55513 typ host
-[14:45:21.751] [ICE-CAND    ] Gathered local candidate #0: a=candidate:1 1 UDP 2114977791 192.168.1.4 55513 typ host
-[14:45:21.751] [JUICE       ] [INFO] agent.c:1253: Changing state to connecting
-[14:45:21.751] [ICE         ] State changed -> connecting (2)
-[14:45:21.751] [JUICE       ] [DEBUG] agent.c:328: Starting resolver thread for servers
-[14:45:21.751] [ICE         ] juice_gather_candidates initiated (res=0)
-[14:45:21.751] [ICE-SIGNAL  ] Signaling thread started for session '4C910D12' (Role: host)
-[14:45:21.751] [ICE-SIGNAL  ] Subscribing to: 'vchat/4C910D12/peer/#'
-[14:45:21.751] [MQTT        ] Attempting primary broker EMQX (broker.emqx.io:1883)...
-[14:45:21.868] [JUICE       ] [INFO] agent.c:384: Using TURN server openrelay.metered.ca:80
-[14:45:21.868] [JUICE       ] [INFO] agent.c:384: Using TURN server openrelay.metered.ca:443
-[14:45:21.872] [JUICE       ] [INFO] agent.c:470: Using STUN server stun.l.google.com:19302
-[14:45:21.872] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (5 retransmissions left)
-[14:45:21.872] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:21.917] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:21.917] [JUICE       ] [DEBUG] stun.c:681: Got STUN error code 401
-[14:45:21.917] [JUICE       ] [DEBUG] stun.c:799: Remote agent does not support RFC 8489
-[14:45:21.917] [JUICE       ] [DEBUG] agent.c:1873: Got TURN Allocate Unauthorized response
-[14:45:21.929] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (5 retransmissions left)
-[14:45:21.929] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:21.975] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:21.975] [JUICE       ] [DEBUG] stun.c:681: Got STUN error code 401
-[14:45:21.975] [JUICE       ] [DEBUG] stun.c:799: Remote agent does not support RFC 8489
-[14:45:21.975] [JUICE       ] [DEBUG] agent.c:1873: Got TURN Allocate Unauthorized response
-[14:45:21.990] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 74.125.250.129:19302 (5 retransmissions left)
-[14:45:21.990] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:22.018] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:45:22.018] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:45:22.018] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:45:22.018] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:45:22.018] [JUICE       ] [DEBUG] agent.c:2341: Gathered reflexive candidate: a=candidate:2 1 UDP 1678769919 24.133.73.13 32861 typ srflx raddr 0.0.0.0 rport 0
-[14:45:22.018] [ICE-CAND    ] Gathered local candidate #1: a=candidate:2 1 UDP 1678769919 24.133.73.13 32861 typ srflx raddr 0.0.0.0 rport 0
-[14:45:22.037] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (5 retransmissions left)
-[14:45:22.037] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:22.083] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:22.083] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:22.083] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:22.083] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:22.083] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (5 retransmissions left)
-[14:45:22.083] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:22.084] [MQTT        ] Connected to MQTT broker broker.emqx.io:1883 (Client ID: vci_host_0029)
-[14:45:22.084] [ICE-SIGNAL  ] Connected to MQTT broker: broker.emqx.io:1883
-[14:45:22.129] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:22.129] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:22.129] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:22.129] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:22.215] [MQTT        ] SUBSCRIBE [vchat/4C910D12/peer/#] -> SUCCESS (SUBACK byte0=0x90)
-[14:45:22.215] [MQTT        ] PUBLISH [vchat/4C910D12/host/desc] (retain=1, status=OK, len=80)
-[14:45:22.215] [ICE-SIGNAL  ] Published local SDP description to [vchat/4C910D12/host/desc] (retained)
-[14:45:22.215] [MQTT        ] PUBLISH [vchat/4C910D12/host/cand/0] (retain=1, status=OK, len=57)
-[14:45:22.215] [ICE-SIGNAL  ] Published candidate #0 to [vchat/4C910D12/host/cand/0]: 'a=candidate:1 1 UDP 2114977791 192.168.1.4 55513 typ host'
-[14:45:22.215] [MQTT        ] PUBLISH [vchat/4C910D12/host/cand/1] (retain=1, status=OK, len=81)
-[14:45:22.215] [ICE-SIGNAL  ] Published candidate #1 to [vchat/4C910D12/host/cand/1]: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 32861 typ srflx raddr 0.0.0.0 rport 0'
-[14:45:22.547] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (4 retransmissions left)
-[14:45:22.547] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:22.592] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:22.592] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:22.592] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:22.592] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:22.592] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (4 retransmissions left)
-[14:45:22.592] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:22.637] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:22.637] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:22.637] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:22.637] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:23.551] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (3 retransmissions left)
-[14:45:23.551] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:23.596] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:23.596] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:23.596] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:23.596] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:23.596] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (3 retransmissions left)
-[14:45:23.596] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:23.641] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:23.641] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:23.641] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:23.641] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:25.547] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (2 retransmissions left)
-[14:45:25.547] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:25.592] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:25.592] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:25.592] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:25.592] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:25.592] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (2 retransmissions left)
-[14:45:25.592] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:25.637] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:25.637] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:25.637] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:25.637] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:29.553] [JUICE       ] [DEBUG] agent.c:942: STUN entry 0: Sending request to 49.13.142.65:80 (1 retransmission left)
-[14:45:29.553] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:29.597] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:29.597] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:29.597] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:29.597] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:29.597] [JUICE       ] [DEBUG] agent.c:942: STUN entry 1: Sending request to 49.13.142.65:443 (1 retransmission left)
-[14:45:29.597] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:29.643] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:29.643] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:29.643] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:29.643] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:34.353] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/desc] (80 bytes payload)
-[14:45:34.353] [ICE-SIGNAL  ] Setting remote SDP description (80 bytes)...
-[14:45:34.353] [JUICE       ] [DEBUG] ice.c:142: Parsed remote description: ufrag="7Ek2", pwd="SkMR4LQKAIPOCYDbAccxwv", candidates=0
-[14:45:34.353] [JUICE       ] [DEBUG] agent.c:568: Unfreezing 0 existing candidate pairs
-[14:45:34.353] [JUICE       ] [DEBUG] agent.c:572: Adding 0 candidates from remote description
-[14:45:34.353] [ICE-SIGNAL  ] Remote SDP description set successfully!
-[14:45:34.356] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/cand/0] (58 bytes payload)
-[14:45:34.356] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:1 1 UDP 2114977791 192.168.1.20 54573 typ host'
-[14:45:34.356] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:54573 (6 retransmissions left)
-[14:45:34.356] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:34.358] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/cand/1] (81 bytes payload)
-[14:45:34.358] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 32870 typ srflx raddr 0.0.0.0 rport 0'
-[14:45:34.358] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32870 (6 retransmissions left)
-[14:45:34.358] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:34.862] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:54573 (5 retransmissions left)
-[14:45:34.862] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:34.862] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32870 (5 retransmissions left)
-[14:45:34.862] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:35.872] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:54573 (4 retransmissions left)
-[14:45:35.872] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:35.872] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32870 (4 retransmissions left)
-[14:45:35.872] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:37.025] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:45:37.025] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:37.052] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:45:37.052] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:45:37.052] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:45:37.052] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:45:37.565] [JUICE       ] [DEBUG] agent.c:939: STUN entry 0: Sending request to 49.13.142.65:80 (no retransmission)
-[14:45:37.565] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:37.596] [JUICE       ] [DEBUG] agent.c:939: STUN entry 1: Sending request to 49.13.142.65:443 (no retransmission)
-[14:45:37.596] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:45:37.611] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:45:37.611] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:37.611] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:37.611] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:37.642] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:45:37.642] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:45:37.642] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:45:37.642] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:45:37.877] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:54573 (3 retransmissions left)
-[14:45:37.877] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:37.877] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32870 (3 retransmissions left)
-[14:45:37.877] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:41.878] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:54573 (2 retransmissions left)
-[14:45:41.878] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:41.878] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32870 (2 retransmissions left)
-[14:45:41.878] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:45.565] [JUICE       ] [DEBUG] agent.c:976: STUN entry 0: Failed
-[14:45:45.565] [JUICE       ] [INFO] agent.c:982: TURN allocation failed
-[14:45:45.597] [JUICE       ] [DEBUG] agent.c:976: STUN entry 1: Failed
-[14:45:45.597] [JUICE       ] [INFO] agent.c:982: TURN allocation failed
-[14:45:45.597] [JUICE       ] [INFO] agent.c:2618: Candidate gathering done
-[14:45:45.597] [JUICE       ] [INFO] agent.c:2602: Connectivity timer started
-[14:45:45.597] [ICE-CAND    ] Local candidate gathering COMPLETED (2 candidates gathered)
-[14:45:45.612] [MQTT        ] PUBLISH [vchat/4C910D12/host/done] (retain=1, status=OK, len=4)
-[14:45:45.612] [ICE-SIGNAL  ] Published gathering DONE to [vchat/4C910D12/host/done]
-[14:45:49.880] [JUICE       ] [DEBUG] agent.c:942: STUN entry 3: Sending request to 192.168.1.20:54573 (1 retransmission left)
-[14:45:49.880] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:49.880] [JUICE       ] [DEBUG] agent.c:942: STUN entry 4: Sending request to 24.133.73.13:32870 (1 retransmission left)
-[14:45:49.880] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:52.058] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:45:52.058] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:45:52.086] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:45:52.086] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:45:52.086] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:45:52.086] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:45:57.711] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/done] (4 bytes payload)
-[14:45:57.711] [ICE-SIGNAL  ] Remote gathering DONE received.
-[14:46:05.872] [JUICE       ] [DEBUG] agent.c:939: STUN entry 3: Sending request to 192.168.1.20:54573 (no retransmission)
-[14:46:05.872] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:46:05.872] [JUICE       ] [DEBUG] agent.c:939: STUN entry 4: Sending request to 24.133.73.13:32870 (no retransmission)
-[14:46:05.872] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:46:07.093] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:46:07.093] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:46:07.120] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:46:07.120] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:46:07.120] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:46:07.120] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:46:13.875] [JUICE       ] [DEBUG] agent.c:976: STUN entry 3: Failed
-[14:46:13.875] [JUICE       ] [DEBUG] agent.c:993: Candidate pair check failed
-[14:46:13.875] [JUICE       ] [DEBUG] agent.c:976: STUN entry 4: Failed
-[14:46:13.875] [JUICE       ] [DEBUG] agent.c:993: Candidate pair check failed
-[14:46:22.138] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:46:22.138] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:46:22.165] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:46:22.165] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:46:22.165] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:46:22.165] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:46:23.573] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/desc] (80 bytes payload)
-[14:46:23.709] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/cand/0] (58 bytes payload)
-[14:46:23.710] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:1 1 UDP 2114977791 192.168.1.20 49167 typ host'
-[14:46:23.710] [JUICE       ] [ERROR] agent.c:588: Remote candidate added after remote gathering done
-[14:46:23.710] [ICE-SIGNAL  ] juice_add_remote_candidate returned -2
-[14:46:23.846] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/cand/1] (81 bytes payload)
-[14:46:23.846] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 32928 typ srflx raddr 0.0.0.0 rport 0'
-[14:46:23.847] [JUICE       ] [ERROR] agent.c:588: Remote candidate added after remote gathering done
-[14:46:23.847] [ICE-SIGNAL  ] juice_add_remote_candidate returned -2
-[14:46:25.090] [JUICE       ] [INFO] agent.c:1225: Connectivity timer expired
-[14:46:25.090] [JUICE       ] [INFO] agent.c:1253: Changing state to failed
-[14:46:25.090] [ICE         ] State changed -> failed (5)
-[14:46:25.090] [ICE         ] CRITICAL: ICE Connection FAILED (all candidate pairs exhausted).
-[14:46:46.911] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/4C910D12/peer/done] (4 bytes payload)
-[14:46:46.911] [ICE-SIGNAL  ] Remote gathering DONE received.
-[14:46:46.911] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:46:46.911] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:46:46.911] [JUICE       ] [INFO] agent.c:1225: Connectivity timer expired
-[14:46:46.939] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:46:46.939] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:46:46.939] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:46:46.939] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32861 from server
-[14:46:46.939] [JUICE       ] [INFO] agent.c:1225: Connectivity timer expired
-[14:46:46.947] [ICE         ] Stopping ICE session...
-[14:46:46.947] [ICE-SIGNAL  ] Signaling thread terminated.
-[14:46:46.947] [JUICE       ] [DEBUG] agent.c:161: Destroying agent
-[14:46:46.947] [JUICE       ] [DEBUG] conn.c:200: Destroying connection
-[14:46:46.947] [JUICE       ] [DEBUG] conn_thread.c:156: Leaving connection thread
-[14:46:46.947] [ICE         ] ICE session stopped cleanly.
-[14:46:59.952] [GUI         ] HOST ROOM clicked: LAN=192.168.1.4, Port=7777, Room=1, Key='voicechat2026', Token=6F73DC04
-[14:46:59.952] [GUI         ] Invite code generated: '192.168.1.4:7777#1#voicechat2026#6F73DC04'
-[14:46:59.952] [ICE         ] Starting ICE session (is_host=1, room_id=1, token='6F73DC04')...
-[14:46:59.952] [JUICE       ] [DEBUG] ice.c:173: Created local description: ufrag="wvHw", pwd="eKloYLv28onX6csV76sSAS"
-[14:46:59.952] [JUICE       ] [DEBUG] agent.c:508: Assuming controlling mode
-[14:46:59.952] [ICE         ] Local SDP generated successfully (80 bytes)
-[14:46:59.952] [JUICE       ] [INFO] agent.c:1253: Changing state to gathering
-[14:46:59.952] [ICE         ] State changed -> gathering (1)
-[14:46:59.952] [JUICE       ] [DEBUG] conn.c:145: Creating connection
-[14:46:59.952] [JUICE       ] [DEBUG] udp.c:166: Opening UDP socket for IPv6 family
-[14:46:59.952] [JUICE       ] [DEBUG] udp.c:96: UDP socket bound to any:55492
-[14:46:59.952] [JUICE       ] [DEBUG] conn_thread.c:181: Starting connection thread
-[14:46:59.952] [JUICE       ] [DEBUG] agent.c:316: Gathered host candidate: a=candidate:1 1 UDP 2114977791 192.168.1.4 55492 typ host
-[14:46:59.952] [ICE-CAND    ] Gathered local candidate #0: a=candidate:1 1 UDP 2114977791 192.168.1.4 55492 typ host
-[14:46:59.952] [JUICE       ] [INFO] agent.c:1253: Changing state to connecting
-[14:46:59.952] [ICE         ] State changed -> connecting (2)
-[14:46:59.953] [JUICE       ] [DEBUG] agent.c:328: Starting resolver thread for servers
-[14:46:59.953] [ICE         ] juice_gather_candidates initiated (res=0)
-[14:46:59.953] [ICE-SIGNAL  ] Signaling thread started for session '6F73DC04' (Role: host)
-[14:46:59.953] [ICE-SIGNAL  ] Subscribing to: 'vchat/6F73DC04/peer/#'
-[14:46:59.953] [MQTT        ] Attempting primary broker EMQX (broker.emqx.io:1883)...
-[14:46:59.953] [JUICE       ] [INFO] agent.c:384: Using TURN server openrelay.metered.ca:80
-[14:46:59.953] [JUICE       ] [INFO] agent.c:384: Using TURN server openrelay.metered.ca:443
-[14:46:59.953] [JUICE       ] [INFO] agent.c:470: Using STUN server stun.l.google.com:19302
-[14:46:59.953] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (5 retransmissions left)
-[14:46:59.953] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:46:59.999] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:46:59.999] [JUICE       ] [DEBUG] stun.c:681: Got STUN error code 401
-[14:46:59.999] [JUICE       ] [DEBUG] stun.c:799: Remote agent does not support RFC 8489
-[14:46:59.999] [JUICE       ] [DEBUG] agent.c:1873: Got TURN Allocate Unauthorized response
-[14:47:00.019] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (5 retransmissions left)
-[14:47:00.019] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:00.065] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:00.065] [JUICE       ] [DEBUG] stun.c:681: Got STUN error code 401
-[14:47:00.065] [JUICE       ] [DEBUG] stun.c:799: Remote agent does not support RFC 8489
-[14:47:00.065] [JUICE       ] [DEBUG] agent.c:1873: Got TURN Allocate Unauthorized response
-[14:47:00.065] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 74.125.250.129:19302 (5 retransmissions left)
-[14:47:00.065] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:00.093] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:47:00.093] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:47:00.093] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:47:00.093] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32933 from server
-[14:47:00.093] [JUICE       ] [DEBUG] agent.c:2341: Gathered reflexive candidate: a=candidate:2 1 UDP 1678769919 24.133.73.13 32933 typ srflx raddr 0.0.0.0 rport 0
-[14:47:00.093] [ICE-CAND    ] Gathered local candidate #1: a=candidate:2 1 UDP 1678769919 24.133.73.13 32933 typ srflx raddr 0.0.0.0 rport 0
-[14:47:00.112] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (5 retransmissions left)
-[14:47:00.112] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:00.157] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:00.157] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:00.157] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:00.157] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:00.157] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (5 retransmissions left)
-[14:47:00.157] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:00.203] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:00.203] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:00.203] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:00.203] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:00.595] [MQTT        ] Connected to MQTT broker broker.emqx.io:1883 (Client ID: vci_host_0029)
-[14:47:00.595] [ICE-SIGNAL  ] Connected to MQTT broker: broker.emqx.io:1883
-[14:47:00.623] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (4 retransmissions left)
-[14:47:00.623] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:00.668] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:00.668] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:00.668] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:00.668] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:00.668] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (4 retransmissions left)
-[14:47:00.668] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:00.714] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:00.714] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:00.714] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:00.714] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:00.731] [MQTT        ] SUBSCRIBE [vchat/6F73DC04/peer/#] -> SUCCESS (SUBACK byte0=0x90)
-[14:47:00.731] [MQTT        ] PUBLISH [vchat/6F73DC04/host/desc] (retain=1, status=OK, len=80)
-[14:47:00.731] [ICE-SIGNAL  ] Published local SDP description to [vchat/6F73DC04/host/desc] (retained)
-[14:47:00.731] [MQTT        ] PUBLISH [vchat/6F73DC04/host/cand/0] (retain=1, status=OK, len=57)
-[14:47:00.731] [ICE-SIGNAL  ] Published candidate #0 to [vchat/6F73DC04/host/cand/0]: 'a=candidate:1 1 UDP 2114977791 192.168.1.4 55492 typ host'
-[14:47:00.731] [MQTT        ] PUBLISH [vchat/6F73DC04/host/cand/1] (retain=1, status=OK, len=81)
-[14:47:00.731] [ICE-SIGNAL  ] Published candidate #1 to [vchat/6F73DC04/host/cand/1]: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 32933 typ srflx raddr 0.0.0.0 rport 0'
-[14:47:01.632] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (3 retransmissions left)
-[14:47:01.632] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:01.676] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:01.677] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:01.677] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:01.677] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:01.677] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (3 retransmissions left)
-[14:47:01.677] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:01.721] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:01.721] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:01.721] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:01.721] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:03.658] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 49.13.142.65:80 (2 retransmissions left)
-[14:47:03.658] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:03.673] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 49.13.142.65:443 (2 retransmissions left)
-[14:47:03.674] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:03.704] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:03.704] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:03.704] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:03.704] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:03.718] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:03.718] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:03.718] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:03.718] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:06.027] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/6F73DC04/peer/desc] (80 bytes payload)
-[14:47:06.027] [ICE-SIGNAL  ] Setting remote SDP description (80 bytes)...
-[14:47:06.027] [JUICE       ] [DEBUG] ice.c:142: Parsed remote description: ufrag="uvaU", pwd="CYnXSTZ/MQHrDGg+nSxdJy", candidates=0
-[14:47:06.027] [JUICE       ] [DEBUG] agent.c:568: Unfreezing 0 existing candidate pairs
-[14:47:06.027] [JUICE       ] [DEBUG] agent.c:572: Adding 0 candidates from remote description
-[14:47:06.027] [ICE-SIGNAL  ] Remote SDP description set successfully!
-[14:47:06.029] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/6F73DC04/peer/cand/0] (58 bytes payload)
-[14:47:06.029] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:1 1 UDP 2114977791 192.168.1.20 65112 typ host'
-[14:47:06.029] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:65112 (6 retransmissions left)
-[14:47:06.029] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:06.158] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/6F73DC04/peer/cand/1] (81 bytes payload)
-[14:47:06.158] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 32939 typ srflx raddr 0.0.0.0 rport 0'
-[14:47:06.158] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32939 (6 retransmissions left)
-[14:47:06.158] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:06.542] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:65112 (5 retransmissions left)
-[14:47:06.542] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:06.667] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32939 (5 retransmissions left)
-[14:47:06.667] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:07.556] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:65112 (4 retransmissions left)
-[14:47:07.556] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:942: STUN entry 0: Sending request to 49.13.142.65:80 (1 retransmission left)
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:942: STUN entry 1: Sending request to 49.13.142.65:443 (1 retransmission left)
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32939 (4 retransmissions left)
-[14:47:07.664] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:07.708] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:07.708] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:07.708] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:07.708] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:07.708] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:07.708] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:07.708] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:07.708] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:09.578] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:65112 (3 retransmissions left)
-[14:47:09.578] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:09.672] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32939 (3 retransmissions left)
-[14:47:09.672] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:13.590] [JUICE       ] [DEBUG] agent.c:945: STUN entry 3: Sending request to 192.168.1.20:65112 (2 retransmissions left)
-[14:47:13.590] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:13.683] [JUICE       ] [DEBUG] agent.c:945: STUN entry 4: Sending request to 24.133.73.13:32939 (2 retransmissions left)
-[14:47:13.683] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:15.099] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:47:15.099] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:15.127] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:47:15.127] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:47:15.127] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:47:15.127] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32933 from server
-[14:47:15.676] [JUICE       ] [DEBUG] agent.c:939: STUN entry 0: Sending request to 49.13.142.65:80 (no retransmission)
-[14:47:15.676] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:15.676] [JUICE       ] [DEBUG] agent.c:939: STUN entry 1: Sending request to 49.13.142.65:443 (no retransmission)
-[14:47:15.676] [JUICE       ] [DEBUG] agent.c:1969: Sending TURN Allocate request
-[14:47:15.722] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:443
-[14:47:15.722] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:15.722] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:15.722] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:15.722] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 49.13.142.65:80
-[14:47:15.722] [JUICE       ] [INFO] stun.c:692: Got STUN error code 400, reason ""
-[14:47:15.722] [JUICE       ] [WARN] agent.c:1328: Missing integrity in STUN message
-[14:47:15.722] [JUICE       ] [WARN] agent.c:1401: Ignoring TURN Allocate message with invalid credentials (Is server authentication disabled?)
-[14:47:21.604] [JUICE       ] [DEBUG] agent.c:942: STUN entry 3: Sending request to 192.168.1.20:65112 (1 retransmission left)
-[14:47:21.604] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:21.682] [JUICE       ] [DEBUG] agent.c:942: STUN entry 4: Sending request to 24.133.73.13:32939 (1 retransmission left)
-[14:47:21.682] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:23.673] [JUICE       ] [DEBUG] agent.c:976: STUN entry 0: Failed
-[14:47:23.673] [JUICE       ] [INFO] agent.c:982: TURN allocation failed
-[14:47:23.673] [JUICE       ] [DEBUG] agent.c:976: STUN entry 1: Failed
-[14:47:23.673] [JUICE       ] [INFO] agent.c:982: TURN allocation failed
-[14:47:23.673] [JUICE       ] [INFO] agent.c:2618: Candidate gathering done
-[14:47:23.673] [JUICE       ] [INFO] agent.c:2602: Connectivity timer started
-[14:47:23.673] [ICE-CAND    ] Local candidate gathering COMPLETED (2 candidates gathered)
-[14:47:23.735] [MQTT        ] PUBLISH [vchat/6F73DC04/host/done] (retain=1, status=OK, len=4)
-[14:47:23.735] [ICE-SIGNAL  ] Published gathering DONE to [vchat/6F73DC04/host/done]
-[14:47:29.286] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/6F73DC04/peer/done] (4 bytes payload)
-[14:47:29.286] [ICE-SIGNAL  ] Remote gathering DONE received.
-[14:47:30.143] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:47:30.143] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:30.170] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:47:30.170] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:47:30.170] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:47:30.170] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32933 from server
-[14:47:37.621] [JUICE       ] [DEBUG] agent.c:939: STUN entry 3: Sending request to 192.168.1.20:65112 (no retransmission)
-[14:47:37.621] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:37.698] [JUICE       ] [DEBUG] agent.c:939: STUN entry 4: Sending request to 24.133.73.13:32939 (no retransmission)
-[14:47:37.698] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:45.179] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:47:45.179] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:47:45.206] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:47:45.206] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:47:45.206] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:47:45.206] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32933 from server
-[14:47:45.630] [JUICE       ] [DEBUG] agent.c:976: STUN entry 3: Failed
-[14:47:45.630] [JUICE       ] [DEBUG] agent.c:993: Candidate pair check failed
-[14:47:45.722] [JUICE       ] [DEBUG] agent.c:976: STUN entry 4: Failed
-[14:47:45.722] [JUICE       ] [DEBUG] agent.c:993: Candidate pair check failed
-[14:48:00.217] [JUICE       ] [DEBUG] agent.c:1017: STUN entry 2: Sending keepalive
-[14:48:00.217] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
-[14:48:00.244] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
-[14:48:00.244] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
-[14:48:00.244] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
-[14:48:00.244] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:32933 from server
-[14:48:03.169] [JUICE       ] [INFO] agent.c:1225: Connectivity timer expired
-[14:48:03.169] [JUICE       ] [INFO] agent.c:1253: Changing state to failed
-[14:48:03.169] [ICE         ] State changed -> failed (5)
-[14:48:03.169] [ICE         ] CRITICAL: ICE Connection FAILED (all candidate pairs exhausted).
-[14:48:37.039] [ICE         ] Stopping ICE session...
-[14:48:37.039] [ICE-SIGNAL  ] Signaling thread terminated.
-[14:48:37.039] [JUICE       ] [DEBUG] agent.c:161: Destroying agent
-[14:48:37.039] [JUICE       ] [DEBUG] conn.c:200: Destroying connection
-[14:48:37.039] [JUICE       ] [DEBUG] conn_thread.c:156: Leaving connection thread
-[14:48:37.040] [ICE         ] ICE session stopped cleanly.
-[14:48:38.615] [SYSTEM      ] Diagnostics session terminated cleanly.
+[14:53:44.135] [SYSTEM      ] ==========================================================
+[14:53:44.135] [SYSTEM      ]  preAlphaVoiceChat Network Diagnostics Engine ACTIVE
+[14:53:44.135] [SYSTEM      ]  Master toggle 'ENABLE_VERBOSE_NET_LOG': 1 (Verbose)
+[14:53:44.135] [SYSTEM      ]  Recording all events to 'network_debug.log'
+[14:53:44.135] [SYSTEM      ] ==========================================================
+[14:53:46.865] [GUI         ] HOST ROOM clicked: LAN=192.168.1.4, Port=7777, Room=1, Key='voicechat2026', Token=B846DC86
+[14:53:46.865] [GUI         ] Invite code generated: '192.168.1.4:7777#1#voicechat2026#B846DC86'
+[14:53:46.866] [ICE         ] Starting ICE session (is_host=1, room_id=1, token='B846DC86', port=7777)...
+[14:53:46.866] [JUICE       ] [DEBUG] ice.c:173: Created local description: ufrag="ao4m", pwd="MUUTjW9c0A4hRR9ClpjHb2"
+[14:53:46.866] [JUICE       ] [DEBUG] agent.c:508: Assuming controlling mode
+[14:53:46.866] [ICE         ] Local SDP generated successfully (80 bytes)
+[14:53:46.866] [JUICE       ] [INFO] agent.c:1253: Changing state to gathering
+[14:53:46.866] [ICE         ] State changed -> gathering (1)
+[14:53:46.866] [JUICE       ] [DEBUG] conn.c:145: Creating connection
+[14:53:46.866] [JUICE       ] [DEBUG] udp.c:166: Opening UDP socket for IPv6 family
+[14:53:46.866] [JUICE       ] [DEBUG] udp.c:128: UDP socket bound to any:7779
+[14:53:46.866] [JUICE       ] [DEBUG] conn_thread.c:181: Starting connection thread
+[14:53:46.866] [JUICE       ] [DEBUG] agent.c:316: Gathered host candidate: a=candidate:1 1 UDP 2114977791 192.168.1.4 7779 typ host
+[14:53:46.866] [ICE-CAND    ] Gathered local candidate #0: a=candidate:1 1 UDP 2114977791 192.168.1.4 7779 typ host
+[14:53:46.866] [JUICE       ] [INFO] agent.c:1253: Changing state to connecting
+[14:53:46.866] [ICE         ] State changed -> connecting (2)
+[14:53:46.867] [JUICE       ] [DEBUG] agent.c:328: Starting resolver thread for servers
+[14:53:46.867] [ICE         ] juice_gather_candidates initiated (res=0)
+[14:53:46.867] [ICE-SIGNAL  ] Signaling thread started for session 'B846DC86' (Role: host)
+[14:53:46.867] [ICE-SIGNAL  ] Subscribing to: 'vchat/B846DC86/peer/#'
+[14:53:46.867] [MQTT        ] Attempting primary broker EMQX (broker.emqx.io:1883)...
+[14:53:46.870] [JUICE       ] [INFO] agent.c:470: Using STUN server stun.l.google.com:19302
+[14:53:46.870] [JUICE       ] [DEBUG] agent.c:945: STUN entry 0: Sending request to 74.125.250.129:19302 (5 retransmissions left)
+[14:53:46.870] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:46.898] [JUICE       ] [DEBUG] agent.c:812: Received STUN datagram from 74.125.250.129:19302
+[14:53:46.898] [JUICE       ] [DEBUG] agent.c:1527: Received STUN Binding success response from server
+[14:53:46.898] [JUICE       ] [INFO] agent.c:1530: STUN server binding successful
+[14:53:46.898] [JUICE       ] [INFO] agent.c:1549: Got STUN mapped address 24.133.73.13:33029 from server
+[14:53:46.898] [JUICE       ] [DEBUG] agent.c:2341: Gathered reflexive candidate: a=candidate:2 1 UDP 1678769919 24.133.73.13 33029 typ srflx raddr 0.0.0.0 rport 0
+[14:53:46.898] [ICE-CAND    ] Gathered local candidate #1: a=candidate:2 1 UDP 1678769919 24.133.73.13 33029 typ srflx raddr 0.0.0.0 rport 0
+[14:53:46.898] [JUICE       ] [INFO] agent.c:2618: Candidate gathering done
+[14:53:46.898] [ICE-CAND    ] Local candidate gathering COMPLETED (2 candidates gathered)
+[14:53:47.161] [MQTT        ] Connected to MQTT broker broker.emqx.io:1883 (Client ID: vci_host_0029)
+[14:53:47.161] [ICE-SIGNAL  ] Connected to MQTT broker: broker.emqx.io:1883
+[14:53:47.291] [MQTT        ] SUBSCRIBE [vchat/B846DC86/peer/#] -> SUCCESS (SUBACK byte0=0x90)
+[14:53:47.291] [MQTT        ] PUBLISH [vchat/B846DC86/host/desc] (retain=1, status=OK, len=80)
+[14:53:47.291] [ICE-SIGNAL  ] Published local SDP description to [vchat/B846DC86/host/desc] (retained)
+[14:53:47.291] [MQTT        ] PUBLISH [vchat/B846DC86/host/cand/0] (retain=1, status=OK, len=56)
+[14:53:47.291] [ICE-SIGNAL  ] Published candidate #0 to [vchat/B846DC86/host/cand/0]: 'a=candidate:1 1 UDP 2114977791 192.168.1.4 7779 typ host'
+[14:53:47.291] [MQTT        ] PUBLISH [vchat/B846DC86/host/cand/1] (retain=1, status=OK, len=81)
+[14:53:47.291] [ICE-SIGNAL  ] Published candidate #1 to [vchat/B846DC86/host/cand/1]: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 33029 typ srflx raddr 0.0.0.0 rport 0'
+[14:53:47.291] [MQTT        ] PUBLISH [vchat/B846DC86/host/done] (retain=1, status=OK, len=4)
+[14:53:47.291] [ICE-SIGNAL  ] Published gathering DONE to [vchat/B846DC86/host/done]
+[14:53:51.656] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/B846DC86/peer/desc] (80 bytes payload)
+[14:53:51.656] [ICE-SIGNAL  ] Setting remote SDP description (80 bytes)...
+[14:53:51.656] [JUICE       ] [DEBUG] ice.c:142: Parsed remote description: ufrag="MWJc", pwd="YC4z/nTmpL3l2vPuM9SQmu", candidates=0
+[14:53:51.656] [JUICE       ] [INFO] agent.c:2602: Connectivity timer started
+[14:53:51.656] [JUICE       ] [DEBUG] agent.c:568: Unfreezing 0 existing candidate pairs
+[14:53:51.656] [JUICE       ] [DEBUG] agent.c:572: Adding 0 candidates from remote description
+[14:53:51.656] [ICE-SIGNAL  ] Remote SDP description set successfully!
+[14:53:51.658] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/B846DC86/peer/cand/0] (58 bytes payload)
+[14:53:51.658] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:1 1 UDP 2114977791 192.168.1.20 56112 typ host'
+[14:53:51.658] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 192.168.1.20:56112 (6 retransmissions left)
+[14:53:51.658] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:51.660] [ICE-SIGNAL  ] RECV MQTT msg on [vchat/B846DC86/peer/cand/1] (81 bytes payload)
+[14:53:51.660] [ICE-SIGNAL  ] Adding remote candidate: 'a=candidate:2 1 UDP 1678769919 24.133.73.13 33035 typ srflx raddr 0.0.0.0 rport 0'
+[14:53:51.660] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 24.133.73.13:33035 (6 retransmissions left)
+[14:53:51.660] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:52.171] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 192.168.1.20:56112 (5 retransmissions left)
+[14:53:52.171] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:52.171] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 24.133.73.13:33035 (5 retransmissions left)
+[14:53:52.171] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:53.178] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 192.168.1.20:56112 (4 retransmissions left)
+[14:53:53.178] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:53.178] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 24.133.73.13:33035 (4 retransmissions left)
+[14:53:53.178] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:55.191] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 192.168.1.20:56112 (3 retransmissions left)
+[14:53:55.191] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:55.191] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 24.133.73.13:33035 (3 retransmissions left)
+[14:53:55.191] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:59.199] [JUICE       ] [DEBUG] agent.c:945: STUN entry 1: Sending request to 192.168.1.20:56112 (2 retransmissions left)
+[14:53:59.199] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:53:59.199] [JUICE       ] [DEBUG] agent.c:945: STUN entry 2: Sending request to 24.133.73.13:33035 (2 retransmissions left)
+[14:53:59.199] [JUICE       ] [DEBUG] agent.c:1679: Sending STUN Binding request
+[14:54:00.410] [ICE         ] Stopping ICE session...
+[14:54:00.410] [ICE-SIGNAL  ] Signaling thread terminated.
+[14:54:00.411] [JUICE       ] [DEBUG] agent.c:161: Destroying agent
+[14:54:00.411] [JUICE       ] [DEBUG] conn.c:200: Destroying connection
+[14:54:00.411] [JUICE       ] [DEBUG] conn_thread.c:156: Leaving connection thread
+[14:54:00.411] [ICE         ] ICE session stopped cleanly.
+[14:54:03.256] [SYSTEM      ] Diagnostics session terminated cleanly.

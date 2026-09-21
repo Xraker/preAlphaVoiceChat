@@ -1357,12 +1357,16 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
     char my_done_topic[64];
     snprintf(my_done_topic, sizeof(my_done_topic), "vchat/%s/%s/done", g_ice.session_token, my_role);
 
+    char room_token_topic[64];
+    snprintf(room_token_topic, sizeof(room_token_topic), "vchat/room_%u/token", g_ice.room_id);
+
     net_log("ICE-SIGNAL", "Signaling thread started for session '%s' (Role: %s)", g_ice.session_token, my_role);
     net_log("ICE-SIGNAL", "Subscribing to: '%s'", sub_topic);
 
     int published_cand_idx = 0;
     bool published_desc = false;
     bool published_done = false;
+    bool published_room_token = false;
     uint64_t last_ping_us = telemetry_now_us();
 
     while (g_ice.is_running) {
@@ -1377,18 +1381,30 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
             if (g_ice.mqtt_sock != INVALID_SOCKET) {
                 net_log("ICE-SIGNAL", "Connected to MQTT broker: %s", broker_used);
                 mqtt_subscribe(g_ice.mqtt_sock, sub_topic);
+                if (!g_ice.is_host) {
+                    mqtt_subscribe(g_ice.mqtt_sock, room_token_topic);
+                }
                 DWORD recv_to = 50; // 50ms timeout for non-blocking loop
                 setsockopt(g_ice.mqtt_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_to, sizeof(recv_to));
                 last_ping_us = telemetry_now_us();
                 published_desc = false;
                 published_cand_idx = 0;
                 published_done = false;
+                published_room_token = false;
             } else {
                 net_log("ICE-SIGNAL", "WARNING: MQTT broker connection failed. Retrying in 1s...");
                 for (int s = 0; s < 20 && g_ice.is_running; s++) {
                     Sleep(50);
                 }
                 continue;
+            }
+        }
+
+        // 0. Host publishes session token to room discovery topic
+        if (g_ice.is_host && !published_room_token) {
+            if (mqtt_publish(g_ice.mqtt_sock, room_token_topic, g_ice.session_token, true)) {
+                published_room_token = true;
+                net_log("ICE-SIGNAL", "Published room discovery token to [%s]: '%s'", room_token_topic, g_ice.session_token);
             }
         }
 
@@ -1467,8 +1483,24 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
 
                 net_log("ICE-SIGNAL", "RECV MQTT msg on [%s] (%d bytes payload)", r_topic, (int)strlen(r_payload));
 
+                // Check if message is room discovery token (for joiners without manual invite code)
+                if (strstr(r_topic, "/token") != NULL && !g_ice.is_host) {
+                    if (strlen(r_payload) > 0 && strcmp(g_ice.session_token, r_payload) != 0) {
+                        EnterCriticalSection(&g_ice.cs);
+                        strncpy_s(g_ice.session_token, sizeof(g_ice.session_token), r_payload, _TRUNCATE);
+                        snprintf(sub_topic, sizeof(sub_topic), "vchat/%s/host/#", g_ice.session_token);
+                        snprintf(my_desc_topic, sizeof(my_desc_topic), "vchat/%s/peer/desc", g_ice.session_token);
+                        snprintf(my_cand_prefix, sizeof(my_cand_prefix), "vchat/%s/peer/cand", g_ice.session_token);
+                        snprintf(my_done_topic, sizeof(my_done_topic), "vchat/%s/peer/done", g_ice.session_token);
+                        published_desc = false;
+                        published_cand_idx = 0;
+                        LeaveCriticalSection(&g_ice.cs);
+                        mqtt_subscribe(g_ice.mqtt_sock, sub_topic);
+                        net_log("ICE-SIGNAL", "Discovered host session token '%s'! Subscribed to [%s]", g_ice.session_token, sub_topic);
+                    }
+                }
                 // Check if message is remote description
-                if (strstr(r_topic, "/desc") != NULL) {
+                else if (strstr(r_topic, "/desc") != NULL) {
                     EnterCriticalSection(&g_ice.cs);
                     if (!g_ice.remote_sdp_set && strlen(r_payload) > 0) {
                         net_log("ICE-SIGNAL", "Setting remote SDP description (%d bytes)...", (int)strlen(r_payload));
@@ -2432,7 +2464,7 @@ static void gui_handle_host(void) {
 
     char status_buf[256];
     snprintf(status_buf, sizeof(status_buf),
-             "HOSTING Room %u [Token: %s | ICE Gathering Active] | Invite copied! Ready for peers.",
+             "HOSTING Room %u [Token: %s] | Invite copied to clipboard! Waiting for peer to join...",
              room_id, session_token);
     gui_update_status(status_buf);
 }
@@ -2576,7 +2608,7 @@ static void gui_handle_join(void) {
 
     char status_buf[256];
     snprintf(status_buf, sizeof(status_buf),
-             "JOINED Room %u [Token: %s | ICE Gathering Active] | Streaming audio...",
+             "CONNECTING to Room %u [Token: %s] | Exchanging ICE candidates with host...",
              room_id, session_token);
     gui_update_status(status_buf);
 }
