@@ -6,3 +6,10 @@ pre-alpha-voice-chat/
 *.pck
 *.uid
 *.import
+
+# Build artifacts & object files
+*.o
+*.obj
+
+# Third-party submodule / vendored library
+libjuice/

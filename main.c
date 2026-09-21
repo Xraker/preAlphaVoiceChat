@@ -127,6 +127,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <juice.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 // COMPILER PRAGMA LINKERS (FOR MSVC / CLANG-CL COMPATIBILITY)
@@ -877,119 +878,6 @@ static void get_local_ip(char *out_ip, size_t max_len) {
     strncpy_s(out_ip, max_len, "127.0.0.1", _TRUNCATE);
 }
 
-#pragma pack(push, 1)
-typedef struct StunHeader {
-    uint16_t msg_type;
-    uint16_t msg_len;
-    uint32_t magic;
-    uint8_t  tx_id[12];
-} StunHeader;
-#pragma pack(pop)
-
-static bool stun_parse_response_packet(const uint8_t *resp, int resp_len, char *out_ip, size_t max_len, int *out_port) {
-    if (!resp || resp_len < 20) return false;
-    StunHeader *hdr = (StunHeader*)resp;
-    if (ntohs(hdr->msg_type) != 0x0101) return false;
-    if (ntohl(hdr->magic) != 0x2112A442) return false;
-
-    int offset = 20;
-    while (offset + 4 <= resp_len) {
-        uint16_t attr_type = ntohs(*(uint16_t*)(resp + offset));
-        uint16_t attr_len  = ntohs(*(uint16_t*)(resp + offset + 2));
-        offset += 4;
-        if (offset + attr_len > resp_len) break;
-
-        if (attr_type == 0x0020 && attr_len >= 8) { // XOR-MAPPED-ADDRESS
-            uint8_t family = resp[offset + 1];
-            if (family == 0x01) { // IPv4
-                uint16_t xor_port = *(uint16_t*)(resp + offset + 2);
-                uint16_t real_port = ntohs(xor_port ^ (uint16_t)(0x2112A442 >> 16));
-                uint32_t xor_ip = *(uint32_t*)(resp + offset + 4);
-                uint32_t real_ip = xor_ip ^ htonl(0x2112A442);
-
-                struct in_addr in;
-                in.s_addr = real_ip;
-                const char *ip_str = inet_ntoa(in);
-                if (ip_str) {
-                    if (out_ip && max_len > 0) strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    if (out_port) *out_port = (int)real_port;
-                    return true;
-                }
-            }
-        } else if (attr_type == 0x0001 && attr_len >= 8) { // MAPPED-ADDRESS
-            uint8_t family = resp[offset + 1];
-            if (family == 0x01) { // IPv4
-                uint16_t real_port = ntohs(*(uint16_t*)(resp + offset + 2));
-                uint32_t real_ip = *(uint32_t*)(resp + offset + 4);
-
-                struct in_addr in;
-                in.s_addr = real_ip;
-                const char *ip_str = inet_ntoa(in);
-                if (ip_str) {
-                    if (out_ip && max_len > 0) strncpy_s(out_ip, max_len, ip_str, _TRUNCATE);
-                    if (out_port) *out_port = (int)real_port;
-                    return true;
-                }
-            }
-        }
-        offset += attr_len;
-        if (attr_len % 4 != 0) offset += (4 - (attr_len % 4));
-    }
-    return false;
-}
-
-static bool stun_send_request(SOCKET s, const char *stun_host, int stun_port) {
-    struct hostent *he = gethostbyname(stun_host);
-    if (!he || !he->h_addr_list[0]) return false;
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons((u_short)stun_port);
-    memcpy(&serv_addr.sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
-
-    StunHeader req;
-    req.msg_type = htons(0x0001); // RFC 5389 Binding Request
-    req.msg_len  = htons(0x0000);
-    req.magic    = htonl(0x2112A442);
-    for (int i = 0; i < 12; i++) req.tx_id[i] = (uint8_t)(rand() & 0xFF);
-
-    return (sendto(s, (const char*)&req, sizeof(req), 0, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) > 0);
-}
-
-static bool stun_resolve_socket(SOCKET s, const char *stun_host, int stun_port, char *out_ip, size_t max_len, int *out_port) {
-    DWORD timeout = 800;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    if (!stun_send_request(s, stun_host, stun_port)) {
-        net_log("STUN", "FAIL: stun_send_request failed to %s:%d (WSA error: %d)", stun_host, stun_port, WSAGetLastError());
-        return false;
-    }
-
-    uint8_t resp[512];
-    int resp_len = recv(s, (char*)resp, sizeof(resp), 0);
-    if (resp_len < 20) {
-        net_log("STUN", "Timeout or no reply from %s:%d (recv returned %d, WSA err: %d)", stun_host, stun_port, resp_len, WSAGetLastError());
-        return false;
-    }
-
-    if (stun_parse_response_packet(resp, resp_len, out_ip, max_len, out_port)) {
-        net_log("STUN", "Success via %s:%d -> Public Endpoint: %s:%d", stun_host, stun_port, out_ip, *out_port);
-        return true;
-    }
-    net_log("STUN", "STUN server %s response did not contain mapped IPv4 address", stun_host);
-    return false;
-}
-
-static bool stun_resolve_endpoint(SOCKET s, char *out_ip, size_t max_len, int *out_port) {
-    net_log("STUN", "Resolving public reflexive endpoint via Google STUN pool...");
-    if (stun_resolve_socket(s, "stun.l.google.com", 19302, out_ip, max_len, out_port)) return true;
-    if (stun_resolve_socket(s, "stun1.l.google.com", 19302, out_ip, max_len, out_port)) return true;
-    if (stun_resolve_socket(s, "stun2.l.google.com", 19302, out_ip, max_len, out_port)) return true;
-    net_log("STUN", "WARNING: All STUN servers failed to resolve endpoint.");
-    return false;
-}
-
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
@@ -1014,29 +902,6 @@ static void generate_session_token(char *out_token, size_t max_len) {
         snprintf(out_token, max_len, "%08X", (unsigned)rnd);
     }
 }
-
-// Traversal Diagnostics Tracker for Transparent Connection Error Reporting
-typedef struct TraversalDiagnostics {
-    bool socket_created;
-    bool connreset_disabled;
-    int  local_port;
-    bool stun_resolved;
-    char my_pub_ip[64];
-    int  my_pub_port;
-    bool broker_connected;
-    char broker_host[64];
-    bool signaling_announced;
-    char signaling_topic[64];
-    bool host_acknowledged;
-    int  probes_sent;
-    bool join_ack_received;
-    int  last_wsa_error;
-    char target_wan[64];
-    int  target_port;
-    char target_lan[64];
-} TraversalDiagnostics;
-
-static TraversalDiagnostics g_join_diag;
 
 // Pure Winsock MQTT Signaling Engine (TCP Port 1883)
 static SOCKET mqtt_connect(const char *host, int port, const char *client_id) {
@@ -1138,17 +1003,44 @@ static bool mqtt_publish(SOCKET s, const char *topic, const char *payload, bool 
     int p_len = (int)strlen(payload);
     int rem_len = 2 + t_len + p_len;
 
-    uint8_t pkt[256];
+    int total_alloc = 5 + rem_len;
+    uint8_t *pkt = (uint8_t*)malloc(total_alloc);
+    if (!pkt) return false;
+
     int idx = 0;
     pkt[idx++] = retain ? 0x31 : 0x30; // PUBLISH (QoS 0, retain flag optional)
-    pkt[idx++] = (uint8_t)rem_len;
-    pkt[idx++] = (uint8_t)(t_len >> 8); pkt[idx++] = (uint8_t)(t_len & 0xFF);
-    memcpy(pkt + idx, topic, t_len); idx += t_len;
-    memcpy(pkt + idx, payload, p_len); idx += p_len;
 
-    bool ok = (send(s, (const char*)pkt, idx, 0) == idx);
-    net_log("MQTT", "PUBLISH [%s] (retain=%d, status=%s): '%s'", topic, retain ? 1 : 0, ok ? "OK" : "FAIL", payload);
-    return ok;
+    // Standard MQTT variable-length integer encoding
+    int rem = rem_len;
+    do {
+        uint8_t encoded_byte = (uint8_t)(rem % 128);
+        rem /= 128;
+        if (rem > 0) encoded_byte |= 0x80;
+        pkt[idx++] = encoded_byte;
+    } while (rem > 0);
+
+    pkt[idx++] = (uint8_t)(t_len >> 8);
+    pkt[idx++] = (uint8_t)(t_len & 0xFF);
+    memcpy(pkt + idx, topic, t_len);
+    idx += t_len;
+
+    memcpy(pkt + idx, payload, p_len);
+    idx += p_len;
+
+    int total_sent = 0;
+    while (total_sent < idx) {
+        int sres = send(s, (const char*)pkt + total_sent, idx - total_sent, 0);
+        if (sres <= 0) {
+            free(pkt);
+            net_log("MQTT", "PUBLISH [%s] (retain=%d, status=FAIL, len=%d)", topic, retain ? 1 : 0, p_len);
+            return false;
+        }
+        total_sent += sres;
+    }
+
+    free(pkt);
+    net_log("MQTT", "PUBLISH [%s] (retain=%d, status=OK, len=%d)", topic, retain ? 1 : 0, p_len);
+    return true;
 }
 
 static bool mqtt_send_ping(SOCKET s) {
@@ -1245,45 +1137,7 @@ typedef struct WirePacket {
 } WirePacket;
 #pragma pack(pop)
 
-// Relay Server State
-typedef struct RelayClient {
-    struct sockaddr_in addr;
-    uint16_t           room_id;
-    uint64_t           last_active_us;
-    bool               active;
-} RelayClient;
-
-typedef struct RelayServer {
-    SOCKET             sock;
-    SOCKET             mqtt_sock;
-    int                port;
-    bool               is_running;
-    bool               broker_connected;
-    HANDLE             hThread;
-    HANDLE             hPunchThread;
-    uint32_t           host_sender_id;
-    char               session_token[32];
-    int                public_port;
-    char               public_ip[64];
-    bool               upnp_active;
-    int                stun_port;
-    uint64_t           total_inbound_probes;
-    uint64_t           total_replies_sent;
-    char               last_probe_ip[64];
-    int                last_probe_port;
-    uint64_t           last_probe_us;
-    bool               mqtt_peer_active;
-    char               mqtt_peer_ip[64];
-    int                mqtt_peer_port;
-    RelayClient        clients[MAX_RELAY_CLIENTS];
-    struct sockaddr_in confirmed_peer_addr;
-    bool               has_confirmed_peer;
-    CRITICAL_SECTION   cs;
-} RelayServer;
-
-static RelayServer g_relay;
-
-// Client Network State
+/// Peer Presence Tracking
 #define MAX_ROOM_PEERS          16
 
 typedef struct PeerPresence {
@@ -1291,963 +1145,502 @@ typedef struct PeerPresence {
     uint64_t last_seen_us;
 } PeerPresence;
 
-typedef struct NetworkClient {
-    SOCKET             sock;
-    struct sockaddr_in server_addr;
-    uint16_t           room_id;
-    uint32_t           my_sender_id;
-    bool               is_connected;
-    HANDLE             hRecvThread;
-    char               session_token[32];
-    int                public_port;
-    char               public_ip[64];
-    PeerPresence       peers[MAX_ROOM_PEERS];
-    CRITICAL_SECTION   cs;
-} NetworkClient;
+// libjuice RFC 8445 ICE Session State
+typedef struct IceSession {
+    juice_agent_t       *agent;
+    bool                is_host;
+    uint16_t            room_id;
+    char                session_token[32];
+    char                local_sdp[JUICE_MAX_SDP_STRING_LEN];
+    bool                local_sdp_ready;
+    bool                remote_sdp_set;
+    char                queued_candidates[32][JUICE_MAX_CANDIDATE_SDP_STRING_LEN];
+    int                 queued_candidate_count;
+    char                local_candidates[32][JUICE_MAX_CANDIDATE_SDP_STRING_LEN];
+    int                 local_candidate_count;
+    bool                gathering_done;
+    juice_state_t       state;
+    char                selected_local[JUICE_MAX_ADDRESS_STRING_LEN];
+    char                selected_remote[JUICE_MAX_ADDRESS_STRING_LEN];
+    char                selected_local_cand[JUICE_MAX_CANDIDATE_SDP_STRING_LEN];
+    char                selected_remote_cand[JUICE_MAX_CANDIDATE_SDP_STRING_LEN];
+    SOCKET              mqtt_sock;
+    HANDLE              hSignalingThread;
+    bool                is_running;
+    bool                is_connected;
+    uint32_t            my_sender_id;
+    PeerPresence        peers[MAX_ROOM_PEERS];
+    CRITICAL_SECTION    cs;
+} IceSession;
 
-static NetworkClient g_net_client;
+static IceSession g_ice;
 
-static void network_client_record_peer(uint32_t sid, uint64_t now_us) {
-    if (sid == 0 || sid == g_net_client.my_sender_id) return;
-    EnterCriticalSection(&g_net_client.cs);
+static void ice_record_peer(uint32_t sid, uint64_t now_us) {
+    if (sid == 0 || sid == g_ice.my_sender_id) return;
+    EnterCriticalSection(&g_ice.cs);
     int found = -1;
     int free_slot = -1;
     for (int i = 0; i < MAX_ROOM_PEERS; i++) {
-        if (g_net_client.peers[i].sender_id == sid) {
+        if (g_ice.peers[i].sender_id == sid) {
             found = i;
             break;
-        } else if (g_net_client.peers[i].sender_id == 0 && free_slot == -1) {
+        } else if (g_ice.peers[i].sender_id == 0 && free_slot == -1) {
             free_slot = i;
         }
     }
     if (found != -1) {
-        g_net_client.peers[found].last_seen_us = now_us;
+        g_ice.peers[found].last_seen_us = now_us;
     } else if (free_slot != -1) {
-        g_net_client.peers[free_slot].sender_id = sid;
-        g_net_client.peers[free_slot].last_seen_us = now_us;
+        g_ice.peers[free_slot].sender_id = sid;
+        g_ice.peers[free_slot].last_seen_us = now_us;
     }
-    LeaveCriticalSection(&g_net_client.cs);
+    LeaveCriticalSection(&g_ice.cs);
 }
 
-static int network_client_get_active_peers(void) {
-    if (!g_net_client.is_connected) return 0;
+static int ice_get_active_peers(void) {
+    if (!g_ice.is_running) return 0;
     uint64_t now_us = telemetry_now_us();
     int active = 0;
-    EnterCriticalSection(&g_net_client.cs);
+    EnterCriticalSection(&g_ice.cs);
     for (int i = 0; i < MAX_ROOM_PEERS; i++) {
-        if (g_net_client.peers[i].sender_id != 0) {
-            if (now_us - g_net_client.peers[i].last_seen_us <= 3500000) { // Active within last 3.5 seconds
+        if (g_ice.peers[i].sender_id != 0) {
+            if (now_us - g_ice.peers[i].last_seen_us <= 3500000) {
                 active++;
             } else {
-                g_net_client.peers[i].sender_id = 0; // Pruned inactive peer
+                g_ice.peers[i].sender_id = 0;
             }
         }
     }
-    LeaveCriticalSection(&g_net_client.cs);
+    LeaveCriticalSection(&g_ice.cs);
     return active;
 }
 
-// --- Relay Server Implementation ---
-static DWORD WINAPI relay_server_thread(LPVOID param) {
-    (void)param;
-    WirePacket packet;
-    struct sockaddr_in from_addr;
-    int from_len = sizeof(from_addr);
-
-    net_log("RELAY-RECV", "Relay server listener thread ACTIVE on socket fd=%lld", (long long)g_relay.sock);
-
-    while (g_relay.is_running) {
-        from_len = sizeof(from_addr);
-        int bytes = recvfrom(g_relay.sock, (char*)&packet, sizeof(packet), 0, (struct sockaddr*)&from_addr, &from_len);
-        if (bytes <= 0 || !g_relay.is_running) continue;
-
-        char from_ip[64] = {0};
-        inet_ntop(AF_INET, &from_addr.sin_addr, from_ip, sizeof(from_ip));
-        int from_port = ntohs(from_addr.sin_port);
-
-        // Intercept and handle STUN keep-alive responses on the relay socket
-        if (bytes >= 20 &&
-            ntohl(*(uint32_t*)((uint8_t*)&packet + 4)) == 0x2112A442 &&
-            ntohs(*(uint16_t*)&packet) == 0x0101) {
-            char stun_ip[64] = {0};
-            int stun_p = 0;
-            if (stun_parse_response_packet((const uint8_t*)&packet, bytes, stun_ip, sizeof(stun_ip), &stun_p)) {
-                g_relay.stun_port = stun_p;
-                if (!g_relay.upnp_active && stun_p > 0) {
-                    g_relay.public_port = stun_p;
-                }
-                net_log("STUN-RECV", "STUN keepalive verified from %s:%d -> Public Endpoint: %s:%d",
-                        from_ip, from_port, stun_ip, stun_p);
-            }
-            continue; // Handled STUN response
-        }
-
-        if (bytes < (int)sizeof(PacketHeader) || packet.header.magic != PACKET_MAGIC) {
-            net_log("RELAY-RECV", "Recv %d bytes from %s:%d [DROPPED: invalid magic 0x%08X (expected 0x%08X) or size < %d]",
-                    bytes, from_ip, from_port, (bytes >= 4 ? (unsigned)packet.header.magic : 0), PACKET_MAGIC, (int)sizeof(PacketHeader));
-            continue; // Ignore non-voicechat packets
-        }
-
-        uint64_t now_us = telemetry_now_us();
-        uint16_t room_id = packet.header.room_id;
-
-        // Informative logging for incoming packets
-        if (packet.header.packet_type == PKT_TYPE_JOIN_REQ) {
-            net_log("RELAY-RECV", "<<< INCOMING JOIN_REQ from %s:%d | Room: %u | SenderID: 0x%08X",
-                    from_ip, from_port, room_id, packet.header.sender_id);
-        } else if (packet.header.packet_type == PKT_TYPE_JOIN_ACK) {
-            net_log("RELAY-RECV", "<<< INCOMING JOIN_ACK from %s:%d | Room: %u | SenderID: 0x%08X",
-                    from_ip, from_port, room_id, packet.header.sender_id);
-        } else if (packet.header.packet_type == PKT_TYPE_HEARTBEAT) {
-            net_log("RELAY-RECV", "<<< INCOMING HEARTBEAT from %s:%d | Room: %u | SenderID: 0x%08X",
-                    from_ip, from_port, room_id, packet.header.sender_id);
-        } else if (packet.header.packet_type == PKT_TYPE_AUDIO) {
-            static uint32_t audio_pkt_log_cnt = 0;
-            audio_pkt_log_cnt++;
-            if (audio_pkt_log_cnt == 1 || (audio_pkt_log_cnt % 300 == 0)) {
-                net_log("RELAY-AUDIO", "Audio stream active from %s:%d (pkt #%u, %d bytes)",
-                        from_ip, from_port, audio_pkt_log_cnt, bytes);
-            }
-        }
-
-        EnterCriticalSection(&g_relay.cs);
-
-        // Update or register sender in client table
-        int sender_idx = -1;
-        int free_idx = -1;
-        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
-            if (g_relay.clients[i].active) {
-                // Timeout prune
-                if (now_us - g_relay.clients[i].last_active_us > CLIENT_TIMEOUT_US) {
-                    g_relay.clients[i].active = false;
-                    continue;
-                }
-                if (g_relay.clients[i].addr.sin_addr.s_addr == from_addr.sin_addr.s_addr &&
-                    g_relay.clients[i].addr.sin_port == from_addr.sin_port) {
-                    sender_idx = i;
-                    g_relay.clients[i].last_active_us = now_us;
-                    g_relay.clients[i].room_id = room_id;
-                }
-            } else if (free_idx == -1) {
-                free_idx = i;
-            }
-        }
-
-        if (sender_idx == -1 && free_idx != -1) {
-            sender_idx = free_idx;
-            g_relay.clients[free_idx].active = true;
-            g_relay.clients[free_idx].addr = from_addr;
-            g_relay.clients[free_idx].room_id = room_id;
-            g_relay.clients[free_idx].last_active_us = now_us;
-            net_log("RELAY-SRV", "Registered client in slot #%d: %s:%d (Room: %u)",
-                    free_idx, from_ip, from_port, room_id);
-        }
-
-        // Count how many active clients are in this room
-        int room_clients = 0;
-        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
-            if (g_relay.clients[i].active && g_relay.clients[i].room_id == room_id) {
-                room_clients++;
-            }
-        }
-
-        // If from a remote peer, track probe telemetry and register confirmed peer address
-        if (from_addr.sin_addr.s_addr != inet_addr("127.0.0.1")) {
-            if (!g_relay.has_confirmed_peer ||
-                g_relay.confirmed_peer_addr.sin_addr.s_addr != from_addr.sin_addr.s_addr ||
-                g_relay.confirmed_peer_addr.sin_port != from_addr.sin_port) {
-                net_log("RELAY-LOCK", "*** LOCKED CONFIRMED PEER ENDPOINT: %s:%d ***", from_ip, from_port);
-            }
-            g_relay.total_inbound_probes++;
-            strncpy_s(g_relay.last_probe_ip, sizeof(g_relay.last_probe_ip), from_ip, _TRUNCATE);
-            g_relay.last_probe_port = from_port;
-            g_relay.last_probe_us = now_us;
-            g_relay.confirmed_peer_addr = from_addr;
-            g_relay.has_confirmed_peer = true;
-        }
-
-        // If JOIN_REQ, immediately send back a burst of 5 JOIN_ACK packets with host sender ID and room count
-        if (packet.header.packet_type == PKT_TYPE_JOIN_REQ) {
-            WirePacket ack;
-            memset(&ack, 0, sizeof(ack));
-            ack.header.magic = PACKET_MAGIC;
-            ack.header.packet_type = PKT_TYPE_JOIN_ACK;
-            ack.header.room_id = room_id;
-            ack.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
-            ack.header.peer_count = (uint8_t)room_clients;
-            ack.header.timestamp_us = now_us;
-            int burst_ok = 0;
-            for (int b = 0; b < 5; b++) {
-                int sres = sendto(g_relay.sock,
-                       (const char*)&ack,
-                       sizeof(PacketHeader),
-                       0,
-                       (struct sockaddr*)&from_addr,
-                       sizeof(from_addr));
-                if (sres > 0) burst_ok++;
-            }
-            g_relay.total_replies_sent += 5;
-            net_log("RELAY-JOIN", ">>> Sent burst of 5 JOIN_ACK replies to %s:%d (%d/5 succeeded, Host SenderID: 0x%08X)",
-                    from_ip, from_port, burst_ok, ack.header.sender_id);
-        }
-
-        // Forward packet to all other peers in the SAME room
-        for (int i = 0; i < MAX_RELAY_CLIENTS; i++) {
-            if (g_relay.clients[i].active &&
-                g_relay.clients[i].room_id == room_id &&
-                i != sender_idx) {
-                sendto(g_relay.sock,
-                       (const char*)&packet,
-                       bytes,
-                       0,
-                       (struct sockaddr*)&g_relay.clients[i].addr,
-                       sizeof(struct sockaddr_in));
-            }
-        }
-
-        LeaveCriticalSection(&g_relay.cs);
+// libjuice Log Callback
+static void on_juice_log(juice_log_level_t level, const char *message) {
+    const char *lvl_str = "INFO";
+    switch (level) {
+        case JUICE_LOG_LEVEL_VERBOSE: lvl_str = "VERBOSE"; break;
+        case JUICE_LOG_LEVEL_DEBUG:   lvl_str = "DEBUG";   break;
+        case JUICE_LOG_LEVEL_INFO:    lvl_str = "INFO";    break;
+        case JUICE_LOG_LEVEL_WARN:    lvl_str = "WARN";    break;
+        case JUICE_LOG_LEVEL_ERROR:   lvl_str = "ERROR";   break;
+        case JUICE_LOG_LEVEL_FATAL:   lvl_str = "FATAL";   break;
+        default: break;
     }
-    net_log("RELAY-RECV", "Relay server listener thread stopped.");
-    return 0;
+    net_log("JUICE", "[%s] %s", lvl_str, message);
 }
 
-static DWORD WINAPI host_hole_punch_thread(LPVOID param) {
+// libjuice State Changed Callback
+static void on_juice_state_changed(juice_agent_t *agent, juice_state_t state, void *user_ptr) {
+    (void)user_ptr;
+    EnterCriticalSection(&g_ice.cs);
+    g_ice.state = state;
+    net_log("ICE", "State changed -> %s (%d)", juice_state_to_string(state), state);
+
+    if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
+        g_ice.is_connected = true;
+        juice_get_selected_addresses(agent, g_ice.selected_local, sizeof(g_ice.selected_local),
+                                     g_ice.selected_remote, sizeof(g_ice.selected_remote));
+        juice_get_selected_candidates(agent, g_ice.selected_local_cand, sizeof(g_ice.selected_local_cand),
+                                      g_ice.selected_remote_cand, sizeof(g_ice.selected_remote_cand));
+        net_log("ICE", "*** ICE CONNECTION ESTABLISHED! ***");
+        net_log("ICE", "Selected Local:  %s (%s)", g_ice.selected_local, g_ice.selected_local_cand);
+        net_log("ICE", "Selected Remote: %s (%s)", g_ice.selected_remote, g_ice.selected_remote_cand);
+
+        // Transmit an initial control handshake packet
+        WirePacket init_pkt;
+        memset(&init_pkt, 0, sizeof(init_pkt));
+        init_pkt.header.magic = PACKET_MAGIC;
+        init_pkt.header.packet_type = PKT_TYPE_JOIN_ACK;
+        init_pkt.header.room_id = g_ice.room_id;
+        init_pkt.header.sender_id = g_ice.my_sender_id;
+        init_pkt.header.timestamp_us = telemetry_now_us();
+        juice_send(agent, (const char*)&init_pkt, sizeof(PacketHeader));
+    } else if (state == JUICE_STATE_FAILED) {
+        g_ice.is_connected = false;
+        net_log("ICE", "CRITICAL: ICE Connection FAILED (all candidate pairs exhausted).");
+    } else if (state == JUICE_STATE_DISCONNECTED) {
+        g_ice.is_connected = false;
+        net_log("ICE", "ICE Disconnected.");
+    }
+    LeaveCriticalSection(&g_ice.cs);
+}
+
+// libjuice Candidate Gathered Callback
+static void on_juice_candidate(juice_agent_t *agent, const char *sdp, void *user_ptr) {
+    (void)agent;
+    (void)user_ptr;
+    EnterCriticalSection(&g_ice.cs);
+    net_log("ICE-CAND", "Gathered local candidate #%d: %s", g_ice.local_candidate_count, sdp);
+    if (g_ice.local_candidate_count < 32) {
+        strncpy_s(g_ice.local_candidates[g_ice.local_candidate_count],
+                  sizeof(g_ice.local_candidates[0]), sdp, _TRUNCATE);
+        g_ice.local_candidate_count++;
+    }
+    LeaveCriticalSection(&g_ice.cs);
+}
+
+// libjuice Gathering Done Callback
+static void on_juice_gathering_done(juice_agent_t *agent, void *user_ptr) {
+    (void)agent;
+    (void)user_ptr;
+    EnterCriticalSection(&g_ice.cs);
+    g_ice.gathering_done = true;
+    net_log("ICE-CAND", "Local candidate gathering COMPLETED (%d candidates gathered)", g_ice.local_candidate_count);
+    LeaveCriticalSection(&g_ice.cs);
+}
+
+// libjuice Message Received Callback
+static void on_juice_recv(juice_agent_t *agent, const char *data, size_t size, void *user_ptr) {
+    (void)agent;
+    (void)user_ptr;
+    if (!data || size < sizeof(PacketHeader)) return;
+    WirePacket *packet = (WirePacket*)data;
+    if (packet->header.magic != PACKET_MAGIC) return;
+
+    // Record peer presence
+    if (packet->header.sender_id != 0) {
+        ice_record_peer(packet->header.sender_id, telemetry_now_us());
+    }
+
+    // Control packets
+    if (packet->header.packet_type == PKT_TYPE_JOIN_REQ ||
+        packet->header.packet_type == PKT_TYPE_JOIN_ACK ||
+        packet->header.packet_type == PKT_TYPE_HEARTBEAT) {
+        return;
+    }
+
+    if (size < sizeof(WirePacket)) return;
+
+    // Audio frame decryption
+    uint8_t decrypted_pcm[VOICE_FRAME_BYTES];
+    uint64_t t0 = telemetry_now_us();
+    bool dec_ok = crypto_decrypt_payload(&packet->header,
+                                         packet->ciphertext,
+                                         VOICE_FRAME_BYTES,
+                                         packet->nonce,
+                                         packet->tag,
+                                         decrypted_pcm);
+    uint64_t t1 = telemetry_now_us();
+    telemetry_record_crypto_overhead((double)(t1 - t0));
+
+    if (!dec_ok) {
+        return;
+    }
+
+    telemetry_record_recv(size, packet->header.sequence, packet->header.timestamp_us);
+    ring_buffer_push(packet->header.sequence, decrypted_pcm, VOICE_FRAME_BYTES);
+}
+
+
+// ICE Signaling Thread (MQTT Pub/Sub for SDP & Candidate Exchange)
+static DWORD WINAPI ice_signaling_thread(LPVOID param) {
     (void)param;
-    char join_topic[64];
-    snprintf(join_topic, sizeof(join_topic), "vchat/%s/join", g_relay.session_token);
+    char my_role[8];
+    char rem_role[8];
+    if (g_ice.is_host) {
+        strcpy_s(my_role, sizeof(my_role), "host");
+        strcpy_s(rem_role, sizeof(rem_role), "peer");
+    } else {
+        strcpy_s(my_role, sizeof(my_role), "peer");
+        strcpy_s(rem_role, sizeof(rem_role), "host");
+    }
 
-    char peer_topic[64];
-    snprintf(peer_topic, sizeof(peer_topic), "vchat/%s/peer", g_relay.session_token);
+    char sub_topic[64];
+    snprintf(sub_topic, sizeof(sub_topic), "vchat/%s/%s/#", g_ice.session_token, rem_role);
 
-    char host_topic[64];
-    snprintf(host_topic, sizeof(host_topic), "vchat/%s/host", g_relay.session_token);
+    char my_desc_topic[64];
+    snprintf(my_desc_topic, sizeof(my_desc_topic), "vchat/%s/%s/desc", g_ice.session_token, my_role);
 
-    char local_ip[64] = {0};
-    get_local_ip(local_ip, sizeof(local_ip));
-    char host_payload[128];
-    snprintf(host_payload, sizeof(host_payload), "HOST:%s:%d:%s:%d",
-             g_relay.public_ip, g_relay.public_port, local_ip, g_relay.port);
+    char my_cand_prefix[64];
+    snprintf(my_cand_prefix, sizeof(my_cand_prefix), "vchat/%s/%s/cand", g_ice.session_token, my_role);
 
-    net_log("HOST-PUNCH", "Thread started. Session token: %s", g_relay.session_token);
-    net_log("HOST-PUNCH", "Signaling topics: JOIN='%s', PEER='%s', HOST='%s'", join_topic, peer_topic, host_topic);
-    net_log("HOST-PUNCH", "Host announcement payload: '%s'", host_payload);
+    char my_done_topic[64];
+    snprintf(my_done_topic, sizeof(my_done_topic), "vchat/%s/%s/done", g_ice.session_token, my_role);
 
+    net_log("ICE-SIGNAL", "Signaling thread started for session '%s' (Role: %s)", g_ice.session_token, my_role);
+    net_log("ICE-SIGNAL", "Subscribing to: '%s'", sub_topic);
+
+    int published_cand_idx = 0;
+    bool published_desc = false;
+    bool published_done = false;
     uint64_t last_ping_us = telemetry_now_us();
-    char peer_pub_ip[64] = {0};
-    int peer_pub_port = 0;
-    char peer_lan_ip[64] = {0};
-    int peer_lan_port = 0;
-    bool has_peer = false;
-    uint64_t punch_until_us = 0;
-    uint64_t last_punch_pulse_us = 0;
-    uint32_t punch_pulse_count = 0;
-    uint64_t last_status_us = 0;
 
-    while (g_relay.is_running) {
-        // Connect / Reconnect if needed
-        if (g_relay.mqtt_sock == INVALID_SOCKET) {
-            char host_client_id[64];
-            snprintf(host_client_id, sizeof(host_client_id), "vch_%08x_%04x",
-                     (uint32_t)telemetry_now_us(), (uint16_t)(rand() & 0xFFFF));
+    while (g_ice.is_running) {
+        // Connect / Reconnect MQTT if needed
+        if (g_ice.mqtt_sock == INVALID_SOCKET) {
+            char client_id[64];
+            snprintf(client_id, sizeof(client_id), "vci_%s_%04x",
+                     my_role, (uint16_t)(rand() & 0xFFFF));
 
             char broker_used[64] = {0};
-            net_log("HOST-PUNCH", "Connecting to MQTT signaling broker (client_id: %s)...", host_client_id);
-            g_relay.mqtt_sock = mqtt_connect_default(host_client_id, broker_used, sizeof(broker_used));
-            if (g_relay.mqtt_sock != INVALID_SOCKET) {
-                g_relay.broker_connected = true;
-                net_log("HOST-PUNCH", "Connected to signaling broker: %s", broker_used);
-                mqtt_subscribe(g_relay.mqtt_sock, join_topic);
-                mqtt_subscribe(g_relay.mqtt_sock, peer_topic);
-                // Announce host with retain = true so joiner gets current endpoints immediately
-                mqtt_publish(g_relay.mqtt_sock, host_topic, host_payload, true);
-                DWORD recv_to = 50; // Short 50ms timeout for non-blocking loop
-                setsockopt(g_relay.mqtt_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_to, sizeof(recv_to));
+            g_ice.mqtt_sock = mqtt_connect_default(client_id, broker_used, sizeof(broker_used));
+            if (g_ice.mqtt_sock != INVALID_SOCKET) {
+                net_log("ICE-SIGNAL", "Connected to MQTT broker: %s", broker_used);
+                mqtt_subscribe(g_ice.mqtt_sock, sub_topic);
+                DWORD recv_to = 50; // 50ms timeout for non-blocking loop
+                setsockopt(g_ice.mqtt_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_to, sizeof(recv_to));
                 last_ping_us = telemetry_now_us();
+                published_desc = false;
+                published_cand_idx = 0;
+                published_done = false;
             } else {
-                g_relay.broker_connected = false;
-                net_log("HOST-PUNCH", "WARNING: Failed to connect to any MQTT broker. Retrying in 1s...");
-                Sleep(1000);
+                net_log("ICE-SIGNAL", "WARNING: MQTT broker connection failed. Retrying in 1s...");
+                for (int s = 0; s < 20 && g_ice.is_running; s++) {
+                    Sleep(50);
+                }
                 continue;
             }
         }
 
-        uint8_t buf[512] = {0};
-        int bytes = recv(g_relay.mqtt_sock, (char*)buf, sizeof(buf), 0);
-        if (!g_relay.is_running) break;
+        // 1. Publish local SDP description once ready
+        if (!published_desc && g_ice.local_sdp_ready) {
+            EnterCriticalSection(&g_ice.cs);
+            char sdp_copy[JUICE_MAX_SDP_STRING_LEN];
+            strncpy_s(sdp_copy, sizeof(sdp_copy), g_ice.local_sdp, _TRUNCATE);
+            LeaveCriticalSection(&g_ice.cs);
+
+            if (mqtt_publish(g_ice.mqtt_sock, my_desc_topic, sdp_copy, true)) {
+                published_desc = true;
+                net_log("ICE-SIGNAL", "Published local SDP description to [%s] (retained)", my_desc_topic);
+            }
+        }
+
+        // 2. Publish newly gathered local candidates
+        int current_cand_count = 0;
+        EnterCriticalSection(&g_ice.cs);
+        current_cand_count = g_ice.local_candidate_count;
+        LeaveCriticalSection(&g_ice.cs);
+
+        while (published_cand_idx < current_cand_count) {
+            EnterCriticalSection(&g_ice.cs);
+            char cand_copy[JUICE_MAX_CANDIDATE_SDP_STRING_LEN];
+            strncpy_s(cand_copy, sizeof(cand_copy), g_ice.local_candidates[published_cand_idx], _TRUNCATE);
+            LeaveCriticalSection(&g_ice.cs);
+
+            char cand_topic[80];
+            snprintf(cand_topic, sizeof(cand_topic), "%s/%d", my_cand_prefix, published_cand_idx);
+            if (mqtt_publish(g_ice.mqtt_sock, cand_topic, cand_copy, true)) {
+                net_log("ICE-SIGNAL", "Published candidate #%d to [%s]: '%s'", published_cand_idx, cand_topic, cand_copy);
+                published_cand_idx++;
+            } else {
+                break;
+            }
+        }
+
+        // 3. Publish gathering done
+        if (!published_done && g_ice.gathering_done && published_cand_idx >= current_cand_count) {
+            if (mqtt_publish(g_ice.mqtt_sock, my_done_topic, "DONE", true)) {
+                published_done = true;
+                net_log("ICE-SIGNAL", "Published gathering DONE to [%s]", my_done_topic);
+            }
+        }
+
+        // 4. Receive incoming MQTT messages from remote peer
+        uint8_t buf[8192];
+        int bytes = recv(g_ice.mqtt_sock, (char*)buf, sizeof(buf) - 1, 0);
+        if (!g_ice.is_running) break;
 
         if (bytes <= 0) {
             int err = (bytes < 0) ? WSAGetLastError() : 0;
             if (bytes == 0 || (err != WSAETIMEDOUT && err != WSAEWOULDBLOCK)) {
-                net_log("HOST-PUNCH", "MQTT connection closed/reset (bytes=%d, WSA err=%d). Reconnecting in 250ms...", bytes, err);
-                closesocket(g_relay.mqtt_sock);
-                g_relay.mqtt_sock = INVALID_SOCKET;
-                g_relay.broker_connected = false;
-                Sleep(250);
+                net_log("ICE-SIGNAL", "MQTT connection dropped (bytes=%d, WSA err=%d). Reconnecting...", bytes, err);
+                closesocket(g_ice.mqtt_sock);
+                g_ice.mqtt_sock = INVALID_SOCKET;
+                for (int s = 0; s < 5 && g_ice.is_running; s++) {
+                    Sleep(50);
+                }
                 continue;
             }
-        }
-
-        uint64_t now_us = telemetry_now_us();
-
-        // Send PINGREQ every 10 seconds to keep connection alive permanently
-        if (now_us - last_ping_us >= 10000000) {
-            mqtt_send_ping(g_relay.mqtt_sock);
-            last_ping_us = now_us;
-        }
-
-        // Periodic status log every 5 seconds
-        if (now_us - last_status_us >= 5000000) {
-            last_status_us = now_us;
-            net_log("HOST-STATUS", "Relay on 0.0.0.0:%d | Public: %s:%d (UPnP: %s) | MQTT: %s | Probes Recv: %u | Replies Sent: %u | Peer: %s",
-                    g_relay.port, g_relay.public_ip, g_relay.public_port,
-                    g_relay.upnp_active ? "ACTIVE" : "INACTIVE",
-                    g_relay.broker_connected ? "CONNECTED" : "DISCONNECTED",
-                    g_relay.total_inbound_probes, g_relay.total_replies_sent,
-                    g_relay.has_confirmed_peer ? g_relay.last_probe_ip : (has_peer ? peer_pub_ip : "None"));
-        }
-
-        if (bytes > 0) {
-            char r_topic[64] = {0};
-            char r_payload[256] = {0};
+        } else {
+            buf[bytes] = '\0';
+            char r_topic[128] = {0};
+            char r_payload[4096] = {0};
             if (mqtt_parse_publish(buf, bytes, r_topic, sizeof(r_topic), r_payload, sizeof(r_payload))) {
-                net_log("HOST-PUNCH", "RECV MQTT msg on [%s]: '%s'", r_topic, r_payload);
-                if (strncmp(r_payload, "JOIN:", 5) == 0 || strncmp(r_payload, "PEER:", 5) == 0) {
-                    char *p1 = r_payload + 5;
-                    char *c1 = strchr(p1, ':');
-                    if (c1) {
-                        *c1 = '\0';
-                        strncpy_s(peer_pub_ip, sizeof(peer_pub_ip), p1, _TRUNCATE);
-                        char *p2 = c1 + 1;
-                        char *c2 = strchr(p2, ':');
-                        if (c2) {
-                            *c2 = '\0';
-                            peer_pub_port = atoi(p2);
-                            char *p3 = c2 + 1;
-                            char *c3 = strchr(p3, ':');
-                            if (c3) {
-                                *c3 = '\0';
-                                strncpy_s(peer_lan_ip, sizeof(peer_lan_ip), p3, _TRUNCATE);
-                                peer_lan_port = atoi(c3 + 1);
-                            } else {
-                                strncpy_s(peer_lan_ip, sizeof(peer_lan_ip), p3, _TRUNCATE);
+                net_log("ICE-SIGNAL", "RECV MQTT msg on [%s] (%d bytes payload)", r_topic, (int)strlen(r_payload));
+
+                // Check if message is remote description
+                if (strstr(r_topic, "/desc") != NULL) {
+                    EnterCriticalSection(&g_ice.cs);
+                    if (!g_ice.remote_sdp_set && strlen(r_payload) > 0) {
+                        net_log("ICE-SIGNAL", "Setting remote SDP description (%d bytes)...", (int)strlen(r_payload));
+                        int res = juice_set_remote_description(g_ice.agent, r_payload);
+                        if (res == JUICE_ERR_SUCCESS) {
+                            g_ice.remote_sdp_set = true;
+                            net_log("ICE-SIGNAL", "Remote SDP description set successfully!");
+
+                            // Flush any candidates that were queued before description arrived
+                            for (int q = 0; q < g_ice.queued_candidate_count; q++) {
+                                net_log("ICE-SIGNAL", "Adding queued remote candidate #%d: '%s'", q, g_ice.queued_candidates[q]);
+                                juice_add_remote_candidate(g_ice.agent, g_ice.queued_candidates[q]);
+                            }
+                            g_ice.queued_candidate_count = 0;
+                        } else {
+                            net_log("ICE-SIGNAL", "ERROR: juice_set_remote_description failed with code %d", res);
+                        }
+                    }
+                    LeaveCriticalSection(&g_ice.cs);
+                }
+                // Check if message is remote candidate
+                else if (strstr(r_topic, "/cand") != NULL && strstr(r_topic, "/done") == NULL) {
+                    EnterCriticalSection(&g_ice.cs);
+                    if (strlen(r_payload) > 0) {
+                        if (g_ice.remote_sdp_set) {
+                            net_log("ICE-SIGNAL", "Adding remote candidate: '%s'", r_payload);
+                            int res = juice_add_remote_candidate(g_ice.agent, r_payload);
+                            if (res != JUICE_ERR_SUCCESS) {
+                                net_log("ICE-SIGNAL", "juice_add_remote_candidate returned %d", res);
                             }
                         } else {
-                            peer_pub_port = atoi(p2);
-                        }
-                    }
-                    has_peer = true;
-                    g_relay.mqtt_peer_active = true;
-                    strncpy_s(g_relay.mqtt_peer_ip, sizeof(g_relay.mqtt_peer_ip), peer_pub_ip, _TRUNCATE);
-                    g_relay.mqtt_peer_port = peer_pub_port;
-                    punch_until_us = now_us + 20000000; // Continuous punch for 20 seconds!
-                    punch_pulse_count = 0;
-
-                    net_log("HOST-PUNCH", "Peer endpoints parsed -> Public: %s:%d | LAN: %s:%d",
-                            peer_pub_ip, peer_pub_port, peer_lan_ip, peer_lan_port);
-                    net_log("HOST-PUNCH", "Triggering 20-second active hole punching pulse (4 Hz) to peer...");
-
-                    // Send active punching confirmation back on MQTT
-                    char ack_pay[128];
-                    snprintf(ack_pay, sizeof(ack_pay), "PUNCHING:%s:%d", g_relay.public_ip, g_relay.public_port);
-                    mqtt_publish(g_relay.mqtt_sock, host_topic, ack_pay, false);
-                }
-            }
-        }
-
-        // STUN NAT pinhole keep-alive every 3 seconds (async via relay_server_thread)
-        static uint64_t last_stun_keepalive_us = 0;
-        if (now_us - last_stun_keepalive_us >= 3000000) {
-            last_stun_keepalive_us = now_us;
-            stun_send_request(g_relay.sock, "stun.l.google.com", 19302);
-        }
-
-        // Active hole punching while punch_until_us is active or confirmed peer exists (paced at 250ms, 4 Hz)
-        if ((has_peer || g_relay.has_confirmed_peer) && (now_us - last_punch_pulse_us >= 250000)) {
-            last_punch_pulse_us = now_us;
-            punch_pulse_count++;
-            WirePacket punch;
-            memset(&punch, 0, sizeof(punch));
-            punch.header.magic = PACKET_MAGIC;
-            punch.header.packet_type = PKT_TYPE_JOIN_ACK;
-            punch.header.room_id = 0;
-            punch.header.sender_id = g_relay.host_sender_id ? g_relay.host_sender_id : 1;
-            punch.header.timestamp_us = now_us;
-
-            // 1. If we have received an actual packet from the peer, punch DIRECTLY to their confirmed address!
-            if (g_relay.has_confirmed_peer) {
-                char conf_ip[64] = {0};
-                inet_ntop(AF_INET, &g_relay.confirmed_peer_addr.sin_addr, conf_ip, sizeof(conf_ip));
-                int conf_port = ntohs(g_relay.confirmed_peer_addr.sin_port);
-
-                int sres = sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                       (struct sockaddr*)&g_relay.confirmed_peer_addr, sizeof(g_relay.confirmed_peer_addr));
-                g_relay.total_replies_sent++;
-                if (punch_pulse_count % 4 == 1) {
-                    net_log("HOST-PUNCH", "Pulse #%u: Outbound punch to CONFIRMED peer %s:%d (sendto res=%d)",
-                            punch_pulse_count, conf_ip, conf_port, sres);
-                }
-            } else if (peer_pub_port > 0 && strlen(peer_pub_ip) > 0 && now_us < punch_until_us) {
-                // If peer announced on MQTT but no packet received yet, send direct punch packet to announced endpoint
-                struct sockaddr_in target_pub;
-                memset(&target_pub, 0, sizeof(target_pub));
-                target_pub.sin_family = AF_INET;
-                inet_pton(AF_INET, peer_pub_ip, &target_pub.sin_addr);
-
-                // 1. Exact announced STUN port
-                target_pub.sin_port = htons((u_short)peer_pub_port);
-                int sres = sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                       (struct sockaddr*)&target_pub, sizeof(target_pub));
-                g_relay.total_replies_sent++;
-
-                // 2. Sequential port prediction (+1, +2, -1, -2) for cellular CGNAT
-                if (peer_pub_port < 65535) {
-                    target_pub.sin_port = htons((u_short)(peer_pub_port + 1));
-                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                           (struct sockaddr*)&target_pub, sizeof(target_pub));
-                }
-                if (peer_pub_port < 65534) {
-                    target_pub.sin_port = htons((u_short)(peer_pub_port + 2));
-                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                           (struct sockaddr*)&target_pub, sizeof(target_pub));
-                }
-                if (peer_pub_port > 1) {
-                    target_pub.sin_port = htons((u_short)(peer_pub_port - 1));
-                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                           (struct sockaddr*)&target_pub, sizeof(target_pub));
-                }
-                if (peer_pub_port > 2) {
-                    target_pub.sin_port = htons((u_short)(peer_pub_port - 2));
-                    sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                           (struct sockaddr*)&target_pub, sizeof(target_pub));
-                }
-
-                if (sres <= 0) {
-                    net_log("HOST-PUNCH", "Pulse #%u FAIL: sendto %s:%d returned %d (WSA error: %d)",
-                            punch_pulse_count, peer_pub_ip, peer_pub_port, sres, WSAGetLastError());
-                } else if (punch_pulse_count <= 5 || (punch_pulse_count % 4 == 1)) {
-                    net_log("HOST-PUNCH", "Pulse #%u: Outbound punch to announced peer %s:%d (sendto res=%d)",
-                            punch_pulse_count, peer_pub_ip, peer_pub_port, sres);
-                }
-            }
-
-            if (peer_lan_port > 0 && strlen(peer_lan_ip) > 0 && now_us < punch_until_us && strcmp(peer_lan_ip, "127.0.0.1") != 0) {
-                struct sockaddr_in target_lan;
-                memset(&target_lan, 0, sizeof(target_lan));
-                target_lan.sin_family = AF_INET;
-                target_lan.sin_port = htons((u_short)peer_lan_port);
-                inet_pton(AF_INET, peer_lan_ip, &target_lan.sin_addr);
-                sendto(g_relay.sock, (const char*)&punch, sizeof(PacketHeader), 0,
-                       (struct sockaddr*)&target_lan, sizeof(target_lan));
-            }
-        }
-    }
-
-    if (g_relay.mqtt_sock != INVALID_SOCKET) {
-        net_log("HOST-PUNCH", "Clearing retained host topic '%s' and disconnecting MQTT...", host_topic);
-        mqtt_publish(g_relay.mqtt_sock, host_topic, "", true); // Clear retained topic
-        closesocket(g_relay.mqtt_sock);
-        g_relay.mqtt_sock = INVALID_SOCKET;
-    }
-    net_log("HOST-PUNCH", "Host signaling thread terminated.");
-    return 0;
-}
-
-static bool relay_server_start(int port, const char *token, bool upnp_active) {
-    net_log("HOST-RELAY", "Starting Relay Server on local port %d...", port);
-    memset(&g_relay, 0, sizeof(g_relay));
-    InitializeCriticalSection(&g_relay.cs);
-    g_relay.port = port;
-    g_relay.upnp_active = upnp_active;
-    g_relay.mqtt_sock = INVALID_SOCKET;
-    if (token) strncpy_s(g_relay.session_token, sizeof(g_relay.session_token), token, _TRUNCATE);
-
-    g_relay.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (g_relay.sock == INVALID_SOCKET) {
-        net_log("HOST-RELAY", "CRITICAL: Failed to create UDP socket! (WSA error: %d)", WSAGetLastError());
-        return false;
-    }
-
-    // Suppress ICMP Port Unreachable WSAECONNRESET (10054) on UDP socket
-    disable_udp_connreset(g_relay.sock);
-
-    // Enable socket reuse
-    int opt = 1;
-    setsockopt(g_relay.sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    struct sockaddr_in bind_addr;
-    memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_port = htons((u_short)port);
-    bind_addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(g_relay.sock, (struct sockaddr*)&bind_addr, sizeof(bind_addr)) == SOCKET_ERROR) {
-        net_log("HOST-RELAY", "CRITICAL: Failed to bind UDP socket to 0.0.0.0:%d! (WSA error: %d)", port, WSAGetLastError());
-        closesocket(g_relay.sock);
-        return false;
-    }
-    net_log("HOST-RELAY", "Relay UDP socket bound to 0.0.0.0:%d successfully.", port);
-
-    // Discover public STUN endpoint for THIS exact relay socket
-    int stun_port = port;
-    if (stun_resolve_endpoint(g_relay.sock, g_relay.public_ip, sizeof(g_relay.public_ip), &stun_port)) {
-        g_relay.stun_port = stun_port;
-        net_log("HOST-RELAY", "STUN mapped endpoint for relay socket: %s:%d", g_relay.public_ip, stun_port);
-    } else {
-        get_local_ip(g_relay.public_ip, sizeof(g_relay.public_ip));
-        g_relay.stun_port = port;
-        net_log("HOST-RELAY", "STUN failed; using local IP %s as fallback public IP.", g_relay.public_ip);
-    }
-
-    // Always prefer the STUN-resolved reflexive port for the relay socket!
-    // STUN discovers the true WAN port opened by the NAT/CGNAT/router for this socket.
-    // Even if UPnP reported success locally, ISP/carrier NAT may remap the external port.
-    if (g_relay.stun_port > 0) {
-        g_relay.public_port = g_relay.stun_port;
-        net_log("HOST-RELAY", "Host external port set from STUN reflexive mapping: %d (UPnP status: %s)",
-                g_relay.public_port, upnp_active ? "Active" : "Inactive");
-    } else {
-        g_relay.public_port = port;
-        net_log("HOST-RELAY", "STUN port unavailable; defaulting host external port to %d", port);
-    }
-    // Reset receive timeout to 100ms so relay_server_thread responds promptly
-    DWORD server_rcvto = 100;
-    setsockopt(g_relay.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&server_rcvto, sizeof(server_rcvto));
-
-    g_relay.is_running = true;
-    g_relay.hThread = CreateThread(NULL, 0, relay_server_thread, NULL, 0, NULL);
-    if (strlen(g_relay.session_token) > 0) {
-        g_relay.hPunchThread = CreateThread(NULL, 0, host_hole_punch_thread, NULL, 0, NULL);
-        net_log("HOST-RELAY", "Host signaling thread launched for session token: %s", g_relay.session_token);
-    }
-    return true;
-}
-
-static void relay_server_stop(void) {
-    if (!g_relay.is_running) return;
-    net_log("HOST-RELAY", "Stopping Relay Server and cleaning up threads/sockets...");
-    g_relay.is_running = false;
-    if (g_relay.mqtt_sock != INVALID_SOCKET) {
-        closesocket(g_relay.mqtt_sock);
-        g_relay.mqtt_sock = INVALID_SOCKET;
-    }
-    if (g_relay.sock != INVALID_SOCKET) {
-        closesocket(g_relay.sock);
-        g_relay.sock = INVALID_SOCKET;
-    }
-    if (g_relay.hPunchThread) {
-        WaitForSingleObject(g_relay.hPunchThread, 1000);
-        CloseHandle(g_relay.hPunchThread);
-        g_relay.hPunchThread = NULL;
-    }
-    if (g_relay.hThread) {
-        WaitForSingleObject(g_relay.hThread, 1000);
-        CloseHandle(g_relay.hThread);
-        g_relay.hThread = NULL;
-    }
-    DeleteCriticalSection(&g_relay.cs);
-    net_log("HOST-RELAY", "Relay Server stopped cleanly.");
-}
-
-// --- Client Network Implementation ---
-static DWORD WINAPI network_client_recv_thread(LPVOID param) {
-    (void)param;
-    WirePacket packet;
-    struct sockaddr_in from_addr;
-    int from_len = sizeof(from_addr);
-    uint8_t decrypted_pcm[VOICE_FRAME_BYTES];
-
-    while (g_net_client.is_connected) {
-        int bytes = recvfrom(g_net_client.sock,
-                             (char*)&packet,
-                             sizeof(packet),
-                             0,
-                             (struct sockaddr*)&from_addr,
-                             &from_len);
-        if (bytes <= 0 || !g_net_client.is_connected) continue;
-
-        if (bytes < (int)sizeof(PacketHeader) || packet.header.magic != PACKET_MAGIC) {
-            continue;
-        }
-
-        // Control packets (JOIN_REQ, JOIN_ACK, HEARTBEAT)
-        if (packet.header.packet_type == PKT_TYPE_JOIN_REQ ||
-            packet.header.packet_type == PKT_TYPE_JOIN_ACK ||
-            packet.header.packet_type == PKT_TYPE_HEARTBEAT) {
-            network_client_record_peer(packet.header.sender_id, telemetry_now_us());
-            continue;
-        }
-
-        if (bytes < (int)sizeof(WirePacket)) {
-            continue;
-        }
-
-        // Measure crypto decryption overhead
-        uint64_t t0 = telemetry_now_us();
-        bool dec_ok = crypto_decrypt_payload(&packet.header,
-                                             packet.ciphertext,
-                                             VOICE_FRAME_BYTES,
-                                             packet.nonce,
-                                             packet.tag,
-                                             decrypted_pcm);
-        uint64_t t1 = telemetry_now_us();
-        telemetry_record_crypto_overhead((double)(t1 - t0));
-
-        if (!dec_ok) {
-            // Tampered, corrupted, or incorrect key
-            continue;
-        }
-
-        // Record incoming telemetry metrics
-        telemetry_record_recv(bytes, packet.header.sequence, packet.header.timestamp_us);
-
-        // Record peer presence so we know who is in the room
-        network_client_record_peer(packet.header.sender_id, telemetry_now_us());
-
-        // Push decrypted voice frame into ultra-low latency ring buffer
-        ring_buffer_push(packet.header.sequence, decrypted_pcm, VOICE_FRAME_BYTES);
-    }
-    return 0;
-}
-
-static bool network_client_connect(const char *wan_ip, const char *lan_ip, int server_port, uint16_t room_id, const char *session_token) {
-    net_log("CLIENT", "network_client_connect: Target WAN=%s:%d, LAN=%s, Room=%u, Token=%s",
-            wan_ip ? wan_ip : "none", server_port, lan_ip ? lan_ip : "none", room_id, session_token ? session_token : "none");
-
-    memset(&g_join_diag, 0, sizeof(g_join_diag));
-    if (wan_ip) strncpy_s(g_join_diag.target_wan, sizeof(g_join_diag.target_wan), wan_ip, _TRUNCATE);
-    if (lan_ip) strncpy_s(g_join_diag.target_lan, sizeof(g_join_diag.target_lan), lan_ip, _TRUNCATE);
-    g_join_diag.target_port = server_port;
-
-    memset(&g_net_client, 0, sizeof(g_net_client));
-    InitializeCriticalSection(&g_net_client.cs);
-
-    // 1. Create client UDP socket
-    g_net_client.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (g_net_client.sock == INVALID_SOCKET) {
-        g_join_diag.last_wsa_error = WSAGetLastError();
-        net_log("CLIENT", "CRITICAL: socket(UDP) failed (WSA error: %d)", g_join_diag.last_wsa_error);
-        DeleteCriticalSection(&g_net_client.cs);
-        return false;
-    }
-    g_join_diag.socket_created = true;
-
-    // Suppress ICMP Port Unreachable WSAECONNRESET (10054)
-    disable_udp_connreset(g_net_client.sock);
-    g_join_diag.connreset_disabled = true;
-
-    // Bind client socket to ephemeral local port
-    struct sockaddr_in client_bind;
-    memset(&client_bind, 0, sizeof(client_bind));
-    client_bind.sin_family = AF_INET;
-    client_bind.sin_port = 0;
-    client_bind.sin_addr.s_addr = INADDR_ANY;
-    bind(g_net_client.sock, (struct sockaddr*)&client_bind, sizeof(client_bind));
-
-    // Get bound local port
-    struct sockaddr_in bound_addr;
-    int bound_len = sizeof(bound_addr);
-    getsockname(g_net_client.sock, (struct sockaddr*)&bound_addr, &bound_len);
-    int client_local_port = ntohs(bound_addr.sin_port);
-    g_join_diag.local_port = client_local_port;
-    net_log("CLIENT", "Client UDP socket bound to local port %d", client_local_port);
-
-    // 2. Discover STUN endpoint on THIS socket
-    char my_pub_ip[64] = {0};
-    int my_pub_port = 0;
-    char my_lan_ip[64] = {0};
-    get_local_ip(my_lan_ip, sizeof(my_lan_ip));
-
-    if (stun_resolve_endpoint(g_net_client.sock, my_pub_ip, sizeof(my_pub_ip), &my_pub_port)) {
-        g_join_diag.stun_resolved = true;
-        strncpy_s(g_join_diag.my_pub_ip, sizeof(g_join_diag.my_pub_ip), my_pub_ip, _TRUNCATE);
-        g_join_diag.my_pub_port = my_pub_port;
-        net_log("CLIENT", "STUN discovered public endpoint: %s:%d", my_pub_ip, my_pub_port);
-    } else {
-        strncpy_s(my_pub_ip, sizeof(my_pub_ip), my_lan_ip, _TRUNCATE);
-        my_pub_port = client_local_port;
-        strncpy_s(g_join_diag.my_pub_ip, sizeof(g_join_diag.my_pub_ip), my_pub_ip, _TRUNCATE);
-        g_join_diag.my_pub_port = my_pub_port;
-        net_log("CLIENT", "STUN failed; falling back to LAN IP %s:%d", my_pub_ip, my_pub_port);
-    }
-    strncpy_s(g_net_client.public_ip, sizeof(g_net_client.public_ip), my_pub_ip, _TRUNCATE);
-    g_net_client.public_port = my_pub_port;
-
-    // 3. Connect to MQTT signaling broker & publish endpoint
-    SOCKET join_mqtt = INVALID_SOCKET;
-    char host_topic[64] = {0};
-    char join_topic[64] = {0};
-    char peer_topic[64] = {0};
-
-    if (session_token && strlen(session_token) > 0) {
-        strncpy_s(g_net_client.session_token, sizeof(g_net_client.session_token), session_token, _TRUNCATE);
-        snprintf(join_topic, sizeof(join_topic), "vchat/%s/join", session_token);
-        snprintf(peer_topic, sizeof(peer_topic), "vchat/%s/peer", session_token);
-        snprintf(host_topic, sizeof(host_topic), "vchat/%s/host", session_token);
-        strncpy_s(g_join_diag.signaling_topic, sizeof(g_join_diag.signaling_topic), join_topic, _TRUNCATE);
-
-        char client_id[64];
-        snprintf(client_id, sizeof(client_id), "vcj_%08x_%04x",
-                 (uint32_t)telemetry_now_us(), (uint16_t)(rand() & 0xFFFF));
-
-        net_log("CLIENT", "Connecting to MQTT signaling broker for session %s...", session_token);
-        join_mqtt = mqtt_connect_default(client_id, g_join_diag.broker_host, sizeof(g_join_diag.broker_host));
-        if (join_mqtt != INVALID_SOCKET) {
-            g_join_diag.broker_connected = true;
-            // Subscribe to host announcements
-            mqtt_subscribe(join_mqtt, host_topic);
-
-            char payload[128];
-            snprintf(payload, sizeof(payload), "JOIN:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
-            // Publish to both join and peer topics without retain so host only gets live requests
-            mqtt_publish(join_mqtt, join_topic, payload, false);
-            mqtt_publish(join_mqtt, peer_topic, payload, false);
-            g_join_diag.signaling_announced = true;
-            net_log("CLIENT", "Connected to broker %s. Subscribed to '%s'. Published '%s' to '%s'",
-                    g_join_diag.broker_host, host_topic, payload, join_topic);
-
-            // Short 10ms receive timeout on MQTT socket for checking host status
-            DWORD mqtt_to = 10;
-            setsockopt(join_mqtt, SOL_SOCKET, SO_RCVTIMEO, (const char*)&mqtt_to, sizeof(mqtt_to));
-        } else {
-            net_log("CLIENT", "WARNING: Failed to connect to any MQTT signaling broker!");
-        }
-    }
-
-    // Set receive timeout for probing (350ms to accommodate mobile cellular latency)
-    DWORD timeout_ms = 350;
-    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-
-    // Assign randomized unique sender ID for this client session
-    g_net_client.my_sender_id = (uint32_t)GetCurrentProcessId() ^ (uint32_t)telemetry_now_us();
-    if (g_net_client.my_sender_id == 0) g_net_client.my_sender_id = 1;
-    g_net_client.room_id = room_id;
-    net_log("CLIENT", "Client Session ID: 0x%08X | Room ID: %u", g_net_client.my_sender_id, room_id);
-
-    // Prepare candidate addresses
-    struct sockaddr_in wan_addr, lan_addr, loop_addr;
-    bool has_wan = false, has_lan = false;
-    memset(&wan_addr, 0, sizeof(wan_addr));
-    memset(&lan_addr, 0, sizeof(lan_addr));
-    memset(&loop_addr, 0, sizeof(loop_addr));
-
-    if (wan_ip && strlen(wan_ip) > 0) {
-        wan_addr.sin_family = AF_INET;
-        if (inet_pton(AF_INET, wan_ip, &wan_addr.sin_addr) == 1) {
-            has_wan = true;
-        }
-    }
-
-    if (lan_ip && strlen(lan_ip) > 0 && (!has_wan || strcmp(wan_ip, lan_ip) != 0)) {
-        lan_addr.sin_family = AF_INET;
-        lan_addr.sin_port = htons((u_short)server_port);
-        if (inet_pton(AF_INET, lan_ip, &lan_addr.sin_addr) == 1) {
-            has_lan = true;
-        }
-    }
-
-    loop_addr.sin_family = AF_INET;
-    loop_addr.sin_port = htons((u_short)server_port);
-    inet_pton(AF_INET, "127.0.0.1", &loop_addr.sin_addr);
-
-    if (!has_wan && !has_lan) {
-        net_log("CLIENT", "CRITICAL: No valid target IP address provided!");
-        if (join_mqtt != INVALID_SOCKET) closesocket(join_mqtt);
-        closesocket(g_net_client.sock);
-        g_net_client.sock = INVALID_SOCKET;
-        DeleteCriticalSection(&g_net_client.cs);
-        return false;
-    }
-
-    // Prepare JOIN_REQ packet
-    WirePacket req;
-    memset(&req, 0, sizeof(req));
-    req.header.magic = PACKET_MAGIC;
-    req.header.packet_type = PKT_TYPE_JOIN_REQ;
-    req.header.room_id = room_id;
-    req.header.sender_id = g_net_client.my_sender_id;
-    req.header.timestamp_us = telemetry_now_us();
-
-    bool handshake_ok = false;
-    struct sockaddr_in responder_addr;
-    int resp_len = sizeof(responder_addr);
-    WirePacket ack;
-
-    net_log("CLIENT", "Beginning UDP probe loop (35 attempts, 350ms timeout each)...");
-
-    // Probe loop: 35 attempts * 350ms = ~12 seconds maximum
-    for (int attempt = 0; attempt < 35 && !handshake_ok; attempt++) {
-        g_join_diag.probes_sent++;
-
-        // Check if Host announced its endpoint or acknowledged on MQTT
-        if (join_mqtt != INVALID_SOCKET) {
-            uint8_t mbuf[512] = {0};
-            int r = recv(join_mqtt, (char*)mbuf, sizeof(mbuf), 0);
-            if (r > 0) {
-                char r_top[64] = {0};
-                char r_pay[256] = {0};
-                if (mqtt_parse_publish(mbuf, r, r_top, sizeof(r_top), r_pay, sizeof(r_pay))) {
-                    net_log("CLIENT-MQTT", "RECV MQTT on [%s]: '%s'", r_top, r_pay);
-                    if (strncmp(r_pay, "HOST:", 5) == 0 || strncmp(r_pay, "PUNCHING:", 9) == 0) {
-                        g_join_diag.host_acknowledged = true;
-                        char *prefix_colon = strchr(r_pay, ':');
-                        if (prefix_colon) {
-                            char *hp1 = prefix_colon + 1; // pub_ip
-                            char *hc1 = strchr(hp1, ':'); // :pub_port
-                            if (hc1) {
-                                *hc1 = '\0';
-                                char *hp2 = hc1 + 1;
-                                char *hc2 = strchr(hp2, ':');
-                                if (hc2) *hc2 = '\0';
-                                int h_port = atoi(hp2);
-                                if (h_port > 0 && h_port <= 65535 && h_port != server_port) {
-                                    net_log("CLIENT-MQTT", "Host updated port on MQTT: %d -> %d", server_port, h_port);
-                                    server_port = h_port;
-                                }
-                                if (hp1[0] != '\0') {
-                                    struct in_addr test_in;
-                                    if (inet_pton(AF_INET, hp1, &test_in) == 1) {
-                                        wan_addr.sin_addr = test_in;
-                                        has_wan = true;
-                                    }
-                                }
+                            if (g_ice.queued_candidate_count < 32) {
+                                strncpy_s(g_ice.queued_candidates[g_ice.queued_candidate_count],
+                                          sizeof(g_ice.queued_candidates[0]), r_payload, _TRUNCATE);
+                                g_ice.queued_candidate_count++;
+                                net_log("ICE-SIGNAL", "Queued remote candidate #%d (waiting for remote SDP): '%s'",
+                                        g_ice.queued_candidate_count - 1, r_payload);
                             }
                         }
                     }
+                    LeaveCriticalSection(&g_ice.cs);
+                }
+                // Check if message is remote gathering done
+                else if (strstr(r_topic, "/done") != NULL) {
+                    EnterCriticalSection(&g_ice.cs);
+                    net_log("ICE-SIGNAL", "Remote gathering DONE received.");
+                    juice_set_remote_gathering_done(g_ice.agent);
+                    LeaveCriticalSection(&g_ice.cs);
                 }
             }
-
-            // Re-publish announcement every 3 attempts (~1 sec) to ensure delivery
-            if ((attempt % 3 == 0) && session_token && strlen(session_token) > 0) {
-                char payload[128];
-                snprintf(payload, sizeof(payload), "JOIN:%s:%d:%s:%d", my_pub_ip, my_pub_port, my_lan_ip, client_local_port);
-                mqtt_publish(join_mqtt, join_topic, payload, false);
-                mqtt_publish(join_mqtt, peer_topic, payload, false);
-            }
         }
 
-        // Probing LAN (only if LAN IP is specified and different from WAN)
-        if (has_lan) {
-            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&lan_addr, sizeof(lan_addr));
-        }
-
-        // Probing WAN: direct probe to server_port without triggering port scan filters
-        if (has_wan) {
-            wan_addr.sin_port = htons((u_short)server_port);
-            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
-
-            // Dual-candidate probe: Also probe default port (7777) in case host is on UPnP / port forwarded
-            if (server_port != DEFAULT_RELAY_PORT) {
-                wan_addr.sin_port = htons((u_short)DEFAULT_RELAY_PORT);
-                sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&wan_addr, sizeof(wan_addr));
-            }
-        }
-
-        // Probing Loopback ONLY if connecting to local host
-        if (wan_ip && strcmp(wan_ip, "127.0.0.1") == 0) {
-            sendto(g_net_client.sock, (const char*)&req, sizeof(PacketHeader), 0, (struct sockaddr*)&loop_addr, sizeof(loop_addr));
-        }
-
-        if (attempt <= 3 || (attempt % 5 == 0)) {
-            net_log("CLIENT-PROBE", "Probe #%d/35 sent -> Target WAN: %s:%d (and :%d)",
-                    attempt + 1, wan_ip ? wan_ip : "none", server_port, DEFAULT_RELAY_PORT);
-        }
-
-        // Resilient receive loop: wait up to 350ms per attempt to accommodate mobile cellular latency
-        uint64_t probe_start_us = telemetry_now_us();
-        while (telemetry_now_us() - probe_start_us < 350000) {
-            resp_len = sizeof(responder_addr);
-            int bytes = recvfrom(g_net_client.sock, (char*)&ack, sizeof(ack), 0, (struct sockaddr*)&responder_addr, &resp_len);
-            if (bytes <= 0) {
-                int err = WSAGetLastError();
-                if (err == WSAECONNRESET || err == WSAEWOULDBLOCK) {
-                    Sleep(5);
-                    continue;
-                }
-                break; // True timeout (WSAETIMEDOUT)
-            }
-
-            char r_ip[64] = {0};
-            inet_ntop(AF_INET, &responder_addr.sin_addr, r_ip, sizeof(r_ip));
-            int r_port = ntohs(responder_addr.sin_port);
-
-            net_log("CLIENT-PROBE", "RECV %d bytes from %s:%d (magic=0x%08X, type=%u)",
-                    bytes, r_ip, r_port, (bytes >= 4 ? (unsigned)ack.header.magic : 0),
-                    (bytes >= (int)sizeof(PacketHeader) ? ack.header.packet_type : 255));
-
-            if (bytes >= (int)sizeof(PacketHeader) &&
-                ack.header.magic == PACKET_MAGIC &&
-                (ack.header.packet_type == PKT_TYPE_JOIN_ACK || ack.header.packet_type == PKT_TYPE_JOIN_REQ) &&
-                (ack.header.room_id == room_id || ack.header.room_id == 0)) {
-                // Handshake success! Lock onto the responding address
-                g_net_client.server_addr = responder_addr;
-                handshake_ok = true;
-                g_join_diag.join_ack_received = true;
-                if (ack.header.sender_id != 0) {
-                    network_client_record_peer(ack.header.sender_id, telemetry_now_us());
-                }
-
-                net_log("CLIENT", "*** HANDSHAKE SUCCESS! Connected to %s:%d (Peer count: %u, Host SenderID: 0x%08X) ***",
-                        r_ip, r_port, ack.header.peer_count, ack.header.sender_id);
-
-                // Send burst of 3 confirmation ACKs to host so host's NAT pinhole locks instantly
-                WirePacket reply;
-                memset(&reply, 0, sizeof(reply));
-                reply.header.magic = PACKET_MAGIC;
-                reply.header.packet_type = PKT_TYPE_JOIN_ACK;
-                reply.header.room_id = room_id;
-                reply.header.sender_id = g_net_client.my_sender_id;
-                reply.header.timestamp_us = telemetry_now_us();
-                for (int b = 0; b < 3; b++) {
-                    sendto(g_net_client.sock, (const char*)&reply, sizeof(PacketHeader), 0,
-                           (struct sockaddr*)&responder_addr, sizeof(responder_addr));
-                }
-                break;
-            }
+        // Keep-alive ping every 10 seconds
+        uint64_t now_us = telemetry_now_us();
+        if (now_us - last_ping_us >= 10000000) {
+            mqtt_send_ping(g_ice.mqtt_sock);
+            last_ping_us = now_us;
         }
     }
 
-    if (join_mqtt != INVALID_SOCKET) {
-        closesocket(join_mqtt);
-        join_mqtt = INVALID_SOCKET;
+    if (g_ice.mqtt_sock != INVALID_SOCKET) {
+        closesocket(g_ice.mqtt_sock);
+        g_ice.mqtt_sock = INVALID_SOCKET;
     }
 
-    if (!handshake_ok) {
-        g_join_diag.last_wsa_error = WSAGetLastError();
-        net_log("CLIENT", "FAIL: Handshake failed after %d probes. Last WSA error: %d", g_join_diag.probes_sent, g_join_diag.last_wsa_error);
-        closesocket(g_net_client.sock);
-        g_net_client.sock = INVALID_SOCKET;
-        DeleteCriticalSection(&g_net_client.cs);
+    net_log("ICE-SIGNAL", "Signaling thread terminated.");
+    return 0;
+}
+
+static bool ice_session_start(bool is_host, uint16_t room_id, const char *token) {
+    net_log("ICE", "Starting ICE session (is_host=%d, room_id=%u, token='%s')...",
+            is_host ? 1 : 0, room_id, token ? token : "none");
+
+    memset(&g_ice, 0, sizeof(g_ice));
+    InitializeCriticalSection(&g_ice.cs);
+    g_ice.is_host = is_host;
+    g_ice.room_id = room_id;
+    g_ice.mqtt_sock = INVALID_SOCKET;
+    if (token) strncpy_s(g_ice.session_token, sizeof(g_ice.session_token), token, _TRUNCATE);
+
+    g_ice.my_sender_id = (uint32_t)GetCurrentProcessId() ^ (uint32_t)telemetry_now_us();
+    if (g_ice.my_sender_id == 0) g_ice.my_sender_id = 1;
+
+    juice_set_log_level(JUICE_LOG_LEVEL_DEBUG);
+    juice_set_log_handler(on_juice_log);
+
+    juice_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.concurrency_mode = JUICE_CONCURRENCY_MODE_THREAD;
+
+    config.stun_server_host = "stun.l.google.com";
+    config.stun_server_port = 19302;
+
+    static juice_turn_server_t turn_servers[2];
+    memset(turn_servers, 0, sizeof(turn_servers));
+    turn_servers[0].host = "openrelay.metered.ca";
+    turn_servers[0].port = 80;
+    turn_servers[0].username = "openrelayproject";
+    turn_servers[0].password = "openrelayproject";
+
+    turn_servers[1].host = "openrelay.metered.ca";
+    turn_servers[1].port = 443;
+    turn_servers[1].username = "openrelayproject";
+    turn_servers[1].password = "openrelayproject";
+
+    config.turn_servers = turn_servers;
+    config.turn_servers_count = 2;
+
+    config.cb_state_changed = on_juice_state_changed;
+    config.cb_candidate = on_juice_candidate;
+    config.cb_gathering_done = on_juice_gathering_done;
+    config.cb_recv = on_juice_recv;
+    config.user_ptr = NULL;
+
+    g_ice.agent = juice_create(&config);
+    if (!g_ice.agent) {
+        net_log("ICE", "CRITICAL: juice_create failed!");
+        DeleteCriticalSection(&g_ice.cs);
         return false;
     }
 
-    // Reset receive timeout to 100ms for continuous audio streaming
-    DWORD stream_timeout_ms = 100;
-    setsockopt(g_net_client.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&stream_timeout_ms, sizeof(stream_timeout_ms));
+    if (juice_get_local_description(g_ice.agent, g_ice.local_sdp, sizeof(g_ice.local_sdp)) == JUICE_ERR_SUCCESS) {
+        g_ice.local_sdp_ready = true;
+        net_log("ICE", "Local SDP generated successfully (%d bytes)", (int)strlen(g_ice.local_sdp));
+    } else {
+        net_log("ICE", "CRITICAL: juice_get_local_description failed!");
+        juice_destroy(g_ice.agent);
+        g_ice.agent = NULL;
+        DeleteCriticalSection(&g_ice.cs);
+        return false;
+    }
 
-    g_net_client.is_connected = true;
-    g_net_client.hRecvThread = CreateThread(NULL, 0, network_client_recv_thread, NULL, 0, NULL);
-    net_log("CLIENT", "Client receive thread started. Ready for audio transmission.");
+    int g_res = juice_gather_candidates(g_ice.agent);
+    net_log("ICE", "juice_gather_candidates initiated (res=%d)", g_res);
+
+    g_ice.is_running = true;
+    g_ice.hSignalingThread = CreateThread(NULL, 0, ice_signaling_thread, NULL, 0, NULL);
+    if (!g_ice.hSignalingThread) {
+        net_log("ICE", "CRITICAL: Failed to create signaling thread!");
+        g_ice.is_running = false;
+        juice_destroy(g_ice.agent);
+        g_ice.agent = NULL;
+        DeleteCriticalSection(&g_ice.cs);
+        return false;
+    }
+
     return true;
 }
 
-static void network_client_disconnect(void) {
-    if (!g_net_client.is_connected) return;
-    g_net_client.is_connected = false;
-    if (g_net_client.sock != INVALID_SOCKET) {
-        closesocket(g_net_client.sock);
-        g_net_client.sock = INVALID_SOCKET;
+static void ice_session_stop(void) {
+    if (!g_ice.is_running && !g_ice.agent) return;
+    net_log("ICE", "Stopping ICE session...");
+
+    g_ice.is_running = false;
+    g_ice.is_connected = false;
+
+    if (g_ice.mqtt_sock != INVALID_SOCKET) {
+        closesocket(g_ice.mqtt_sock);
+        g_ice.mqtt_sock = INVALID_SOCKET;
     }
-    if (g_net_client.hRecvThread) {
-        WaitForSingleObject(g_net_client.hRecvThread, 1000);
-        CloseHandle(g_net_client.hRecvThread);
-        g_net_client.hRecvThread = NULL;
+
+    if (g_ice.hSignalingThread) {
+        WaitForSingleObject(g_ice.hSignalingThread, 1500);
+        CloseHandle(g_ice.hSignalingThread);
+        g_ice.hSignalingThread = NULL;
     }
-    DeleteCriticalSection(&g_net_client.cs);
+
+    if (g_ice.agent) {
+        juice_destroy(g_ice.agent);
+        g_ice.agent = NULL;
+    }
+
+    DeleteCriticalSection(&g_ice.cs);
+    net_log("ICE", "ICE session stopped cleanly.");
 }
 
 // Hook called by WASAPI capture thread to transmit encrypted audio frames
 static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t bytes) {
-    if (!g_net_client.is_connected || !pcm || bytes == 0) return;
+    if (!g_ice.is_running || !g_ice.agent || !pcm || bytes == 0) return;
+    if (g_ice.state != JUICE_STATE_CONNECTED && g_ice.state != JUICE_STATE_COMPLETED) return;
 
     WirePacket packet;
     memset(&packet, 0, sizeof(packet));
@@ -2256,8 +1649,8 @@ static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t 
     packet.header.sequence = seq;
     packet.header.timestamp_us = telemetry_now_us();
     packet.header.payload_bytes = (uint16_t)bytes;
-    packet.header.room_id = g_net_client.room_id;
-    packet.header.sender_id = g_net_client.my_sender_id;
+    packet.header.room_id = g_ice.room_id;
+    packet.header.sender_id = g_ice.my_sender_id;
 
     uint64_t t0 = telemetry_now_us();
     bool enc_ok = crypto_encrypt_payload(&packet.header,
@@ -2271,13 +1664,7 @@ static void network_send_audio_frame(uint32_t seq, const uint8_t *pcm, uint32_t 
 
     if (!enc_ok) return;
 
-    int sent = sendto(g_net_client.sock,
-                      (const char*)&packet,
-                      sizeof(WirePacket),
-                      0,
-                      (struct sockaddr*)&g_net_client.server_addr,
-                      sizeof(g_net_client.server_addr));
-
+    int sent = juice_send(g_ice.agent, (const char*)&packet, sizeof(WirePacket));
     if (sent > 0) {
         telemetry_record_send((size_t)sent);
     }
@@ -2731,14 +2118,6 @@ static void upnp_unmap_port(int port) {
     pNat->lpVtbl->Release(pNat);
 }
 
-static bool stun_get_public_ip(const char *stun_host, int stun_port, char *out_ip, size_t max_len) {
-    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == INVALID_SOCKET) return false;
-    int dummy_port = 0;
-    bool ok = stun_resolve_socket(s, stun_host, stun_port, out_ip, max_len, &dummy_port);
-    closesocket(s);
-    return ok;
-}
 
 static bool parse_invite_string(const char *invite,
                                 char *wan_ip, size_t wan_ip_len,
@@ -2812,7 +2191,7 @@ static void gui_update_hud(void) {
     TelemetryState snap;
     telemetry_get_snapshot(&snap);
 
-    int active_peers = network_client_get_active_peers();
+    int active_peers = ice_get_active_peers();
     char mic_str[64];
     char peer_str[64];
     char presence_desc[64];
@@ -2862,18 +2241,23 @@ static void gui_update_hud(void) {
         } else if (g_gui.is_in_call) {
             uint64_t now_us = telemetry_now_us();
             uint32_t active_id = 0;
-            EnterCriticalSection(&g_net_client.cs);
+            EnterCriticalSection(&g_ice.cs);
             for (int i = 0; i < MAX_ROOM_PEERS; i++) {
-                if (g_net_client.peers[i].sender_id != 0 && (now_us - g_net_client.peers[i].last_seen_us <= 3500000)) {
-                    if (active_id == 0) active_id = g_net_client.peers[i].sender_id;
+                if (g_ice.peers[i].sender_id != 0 && (now_us - g_ice.peers[i].last_seen_us <= 3500000)) {
+                    if (active_id == 0) active_id = g_ice.peers[i].sender_id;
                     peer_count++;
                 }
             }
-            LeaveCriticalSection(&g_net_client.cs);
+            LeaveCriticalSection(&g_ice.cs);
 
             char part_buf[64];
             if (peer_count == 0) {
-                strcpy_s(part_buf, sizeof(part_buf), "Participant: None (Waiting for peer)");
+                if (g_ice.is_connected) {
+                    strcpy_s(part_buf, sizeof(part_buf), "Participant: Remote Peer (Connected)");
+                    peer_count = 1;
+                } else {
+                    strcpy_s(part_buf, sizeof(part_buf), "Participant: None (Waiting for peer)");
+                }
             } else if (peer_count == 1) {
                 snprintf(part_buf, sizeof(part_buf), "Participant: Peer #%04X (Active)", active_id & 0xFFFF);
             } else {
@@ -2905,52 +2289,36 @@ static void gui_update_hud(void) {
     for (int b = 0; b < 20; b++) mic_bar[b] = (b < bars) ? '|' : ' ';
     mic_bar[20] = '\0';
 
-    char host_diag_section[350] = {0};
-    if (g_gui.is_host && g_relay.is_running) {
-        char probe_info[128];
-        if (g_relay.total_inbound_probes > 0) {
-            snprintf(probe_info, sizeof(probe_info), "%llu from %s:%d",
-                     (unsigned long long)g_relay.total_inbound_probes,
-                     g_relay.last_probe_ip, g_relay.last_probe_port);
+    char ice_diag_section[512] = {0};
+    if (g_ice.is_running) {
+        const char *state_desc = juice_state_to_string(g_ice.state);
+        char selected_desc[256];
+        if (g_ice.is_connected && g_ice.selected_local[0] && g_ice.selected_remote[0]) {
+            snprintf(selected_desc, sizeof(selected_desc), "%s <--> %s",
+                     g_ice.selected_local, g_ice.selected_remote);
         } else {
-            strcpy_s(probe_info, sizeof(probe_info), "0 (Waiting for joiner UDP packets...)");
+            strcpy_s(selected_desc, sizeof(selected_desc), "Gathering/Negotiating candidate pairs...");
         }
 
-        char mqtt_info[128];
-        if (g_relay.mqtt_peer_active) {
-            snprintf(mqtt_info, sizeof(mqtt_info), "Peer announced: %s:%d",
-                     g_relay.mqtt_peer_ip, g_relay.mqtt_peer_port);
-        } else {
-            snprintf(mqtt_info, sizeof(mqtt_info), "%s (Listening)",
-                     g_relay.broker_connected ? "Broker Connected" : "Connecting...");
-        }
-
-        snprintf(host_diag_section, sizeof(host_diag_section),
+        snprintf(ice_diag_section, sizeof(ice_diag_section),
             " -------------------------------------------------------\r\n"
-            " [HOST RELAY DIAGNOSTICS]\r\n"
-            " Listening Port:  UDP %d (UPnP: %s)\r\n"
-            " Inbound Probes:  %s\r\n"
-            " Responses Sent:  %llu JOIN_ACKs\r\n"
-            " Signaling (MQTT):%s\r\n",
-            g_relay.port,
-            g_relay.upnp_active ? "Active (Forwarded)" : "Disabled/STUN",
-            probe_info,
-            (unsigned long long)g_relay.total_replies_sent,
-            mqtt_info);
+            " [ICE NAT TRAVERSAL DIAGNOSTICS (libjuice RFC 8445)]\r\n"
+            " ICE State:       %s\r\n"
+            " Candidates:      %d local gathered (STUN: Google, TURN: Metered)\r\n"
+            " Active Path:     %s\r\n"
+            " Signaling (MQTT):%s (Session: %s)\r\n",
+            state_desc,
+            g_ice.local_candidate_count,
+            selected_desc,
+            (g_ice.mqtt_sock != INVALID_SOCKET) ? "Connected" : "Reconnecting...",
+            g_ice.session_token);
 
-        char stat_buf[256];
-        if (g_relay.total_inbound_probes > 0) {
-            snprintf(stat_buf, sizeof(stat_buf), "Active! Received %llu probes from %s:%d (Replying)",
-                     (unsigned long long)g_relay.total_inbound_probes,
-                     g_relay.last_probe_ip, g_relay.last_probe_port);
-        } else if (g_relay.mqtt_peer_active) {
-            snprintf(stat_buf, sizeof(stat_buf), "Signaling received! Peer %s:%d detected. Punching...",
-                     g_relay.mqtt_peer_ip, g_relay.mqtt_peer_port);
-        } else {
-            snprintf(stat_buf, sizeof(stat_buf), "Room active! Listening on UDP %d (UPnP: %s). Waiting for peers...",
-                     g_relay.port, g_relay.upnp_active ? "Mapped" : "STUN");
+        if (g_ice.is_connected) {
+            char stat_buf[256];
+            snprintf(stat_buf, sizeof(stat_buf), "Connected via %s [ICE: %s] | Audio Active",
+                     selected_desc, state_desc);
+            SetWindowTextA(g_gui.hStaticStatus, stat_buf);
         }
-        SetWindowTextA(g_gui.hStaticStatus, stat_buf);
     }
 
     char hud_text[1600];
@@ -2977,7 +2345,7 @@ static void gui_update_hud(void) {
         snap.packet_loss_pct, (unsigned long long)snap.out_of_order_count,
         snap.current_buffer_frames, snap.current_buffer_ms,
         snap.crypto_overhead_us,
-        host_diag_section);
+        ice_diag_section);
 
     SetWindowTextA(g_gui.hEditHud, hud_text);
 }
@@ -3010,70 +2378,41 @@ static void gui_handle_host(void) {
     net_log("GUI", "HOST ROOM clicked: LAN=%s, Port=%d, Room=%u, Key='%s', Token=%s",
             local_ip, port, room_id, key, session_token);
 
-    // 3. Attempt UPnP automatic router port mapping as helper
-    bool upnp_ok = upnp_map_port(port, local_ip);
-
-    gui_update_status("Opening UDP socket & discovering STUN public endpoint...");
-
-    // 4. Start Relay Server on this machine (binds socket & queries STUN directly on that socket)
-    if (!relay_server_start(port, session_token, upnp_ok)) {
-        if (upnp_ok) upnp_unmap_port(port);
-        MessageBoxA(g_gui.hwndMain, "Failed to start Relay Server on this machine! Port may be in use.", "Error", MB_ICONERROR);
-        return;
-    }
-
-    // 5. Formulate the invite code (STUN public mapped port + LAN + room + key + session token)
+    // 3. Formulate the invite code (IP:Port#Room#Key#Token)
     char invite_str[256];
-    bool has_public = (strlen(g_relay.public_ip) > 0 && strcmp(g_relay.public_ip, "127.0.0.1") != 0);
-
-    if (has_public && strcmp(g_relay.public_ip, local_ip) != 0) {
-        snprintf(invite_str, sizeof(invite_str), "%s+%s:%d#%u#%s#%s",
-                 g_relay.public_ip, local_ip, g_relay.public_port, room_id, key, session_token);
-        char display_ip[128];
-        snprintf(display_ip, sizeof(display_ip), "%s (+LAN: %s)", g_relay.public_ip, local_ip);
-        SetWindowTextA(g_gui.hEditIp, display_ip);
-    } else {
-        snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s#%s",
-                 local_ip, g_relay.public_port, room_id, key, session_token);
-        SetWindowTextA(g_gui.hEditIp, local_ip);
-    }
+    snprintf(invite_str, sizeof(invite_str), "%s:%d#%u#%s#%s",
+             local_ip, port, room_id, key, session_token);
     SetWindowTextA(g_gui.hEditInvite, invite_str);
-    char port_disp[16];
-    snprintf(port_disp, sizeof(port_disp), "%d", g_relay.public_port);
-    SetWindowTextA(g_gui.hEditPort, port_disp);
+    SetWindowTextA(g_gui.hEditIp, local_ip);
     net_log("GUI", "Invite code generated: '%s'", invite_str);
 
     // Automatically copy invite to clipboard for convenience
     copy_to_clipboard(g_gui.hwndMain, invite_str);
 
-    // 6. Initialize crypto with pre-shared key
+    // 4. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize Windows AES-GCM cryptography!", "Error", MB_ICONERROR);
-        if (upnp_ok) upnp_unmap_port(port);
-        relay_server_stop();
         return;
     }
 
-    // 7. Connect local UDP client to loopback 127.0.0.1 for zero overhead
-    if (!network_client_connect("127.0.0.1", NULL, port, room_id, NULL)) {
-        MessageBoxA(g_gui.hwndMain, "Failed to connect client to local relay!", "Error", MB_ICONERROR);
+    gui_update_status("Starting ICE agent (STUN/TURN) & connecting to signaling...");
+
+    // 5. Start libjuice ICE session
+    if (!ice_session_start(true, room_id, session_token)) {
         crypto_cleanup();
-        if (upnp_ok) upnp_unmap_port(port);
-        relay_server_stop();
+        MessageBoxA(g_gui.hwndMain, "Failed to start libjuice ICE Agent!", "Error", MB_ICONERROR);
+        gui_update_status("Failed to start ICE session.");
         return;
     }
-    g_relay.host_sender_id = g_net_client.my_sender_id;
 
-    // 8. Start WASAPI Audio Engine
+    // 6. Start WASAPI Audio Engine
     int mic_idx = (int)SendMessage(g_gui.hComboMic, CB_GETCURSEL, 0, 0);
     int spk_idx = (int)SendMessage(g_gui.hComboSpk, CB_GETCURSEL, 0, 0);
 
     if (!audio_engine_start(mic_idx, spk_idx, false)) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
-        network_client_disconnect();
+        ice_session_stop();
         crypto_cleanup();
-        if (upnp_ok) upnp_unmap_port(port);
-        relay_server_stop();
         return;
     }
 
@@ -3093,13 +2432,9 @@ static void gui_handle_host(void) {
     EnableWindow(g_gui.hEditKey, FALSE);
 
     char status_buf[256];
-    if (has_public) {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u [STUN: %s:%d | Signaling: Ready | LAN: %s] | Invite copied! Ready for peers.",
-                 room_id, g_relay.public_ip, g_relay.public_port, local_ip);
-    } else {
-        snprintf(status_buf, sizeof(status_buf), "HOSTING Room %u on port %d [Local IP: %s | Signaling: Ready] | Invite copied! Ready for peers.",
-                 room_id, port, local_ip);
-    }
+    snprintf(status_buf, sizeof(status_buf),
+             "HOSTING Room %u [Token: %s | ICE Gathering Active] | Invite copied! Ready for peers.",
+             room_id, session_token);
     gui_update_status(status_buf);
 }
 
@@ -3198,7 +2533,7 @@ static void gui_handle_join(void) {
     net_log("GUI", "JOIN ROOM clicked: Target WAN=%s:%d, LAN=%s, Room=%u, Token=%s",
             wan_ip, port, (lan_ip[0] != '\0') ? lan_ip : "none", room_id, session_token);
 
-    gui_update_status("Traversing NAT & establishing direct P2P hole punch...");
+    gui_update_status("Starting ICE agent (STUN/TURN) & connecting to signaling...");
 
     // 1. Initialize crypto with pre-shared key
     if (!crypto_init(key)) {
@@ -3206,52 +2541,11 @@ static void gui_handle_join(void) {
         return;
     }
 
-    // 2. Connect UDP network client with Method A hole punching
-    if (!network_client_connect(wan_ip, lan_ip, port, room_id, session_token)) {
+    // 2. Start libjuice ICE session as peer (controlling = false)
+    if (!ice_session_start(false, room_id, session_token)) {
         crypto_cleanup();
-
-        char err_msg[1024];
-        const char *wsa_desc = "None / Timeout";
-        if (g_join_diag.last_wsa_error == 10054) wsa_desc = "WSAECONNRESET (Remote port unreachable)";
-        else if (g_join_diag.last_wsa_error == 10060) wsa_desc = "WSAETIMEDOUT (Probes timed out)";
-        else if (g_join_diag.last_wsa_error == 10065) wsa_desc = "WSAEHOSTUNREACH (No route to host)";
-
-        snprintf(err_msg, sizeof(err_msg),
-            "Failed to connect to host! Connection Diagnostics:\r\n\r\n"
-            "[%s] 1. Local Socket: Bound UDP port %d (SIO_UDP_CONNRESET active)\r\n"
-            "[%s] 2. STUN Discovery: Public %s:%d (Google STUN)\r\n"
-            "[%s] 3. Signaling Broker: %s\r\n"
-            "[%s] 4. Peer Announcement: %s (%s)\r\n"
-            "[%s] 5. Host Signaling Ack: %s\r\n"
-            "[FAIL] 6. P2P Direct UDP Hole Punch: Sent %d probes, received 0 responses\r\n"
-            "       - Target Host: %s:%d (LAN: %s)\r\n"
-            "       - Last Winsock Status: Error %d (%s)\r\n\r\n"
-            "Diagnosis:\r\n"
-            "%s\r\n\r\n"
-            "Please confirm the host clicked 'Host Room' and retry.",
-            g_join_diag.socket_created ? "OK" : "FAIL",
-            g_join_diag.local_port,
-            g_join_diag.stun_resolved ? "OK" : "WARN",
-            g_join_diag.my_pub_ip[0] ? g_join_diag.my_pub_ip : "Unknown",
-            g_join_diag.my_pub_port,
-            g_join_diag.broker_connected ? "OK" : "FAIL",
-            g_join_diag.broker_host[0] ? g_join_diag.broker_host : "Failed to connect (TCP 1883)",
-            g_join_diag.signaling_announced ? "OK" : "FAIL",
-            g_join_diag.signaling_topic[0] ? g_join_diag.signaling_topic : "N/A",
-            g_join_diag.signaling_announced ? "Published" : "Not sent",
-            g_join_diag.host_acknowledged ? "OK" : "WAIT",
-            g_join_diag.host_acknowledged ? "Host confirmed alive & punching" : "Host did not answer on signaling topic",
-            g_join_diag.probes_sent,
-            wan_ip, port, (lan_ip[0] != '\0') ? lan_ip : "N/A",
-            g_join_diag.last_wsa_error,
-            wsa_desc,
-            !g_join_diag.host_acknowledged
-                ? "- Host has not started the room yet, or invite code was expired.\r\n- Host and Joiner may be using different signaling brokers."
-                : "- Host is confirmed online on signaling, but UDP packets were blocked.\r\n- One router has strict symmetric NAT or a firewall blocking incoming UDP."
-        );
-
-        MessageBoxA(g_gui.hwndMain, err_msg, "Connection Diagnostics", MB_ICONERROR);
-        gui_update_status("Connection failed: Host did not respond to UDP hole punch.");
+        MessageBoxA(g_gui.hwndMain, "Failed to start libjuice ICE Agent!", "Error", MB_ICONERROR);
+        gui_update_status("Failed to start ICE session.");
         return;
     }
 
@@ -3261,7 +2555,7 @@ static void gui_handle_join(void) {
 
     if (!audio_engine_start(mic_idx, spk_idx, false)) {
         MessageBoxA(g_gui.hwndMain, "Failed to initialize WASAPI Audio endpoints!", "Error", MB_ICONERROR);
-        network_client_disconnect();
+        ice_session_stop();
         crypto_cleanup();
         return;
     }
@@ -3281,12 +2575,10 @@ static void gui_handle_join(void) {
     EnableWindow(g_gui.hEditRoom, FALSE);
     EnableWindow(g_gui.hEditKey, FALSE);
 
-    char resolved_ip[64] = {0};
-    inet_ntop(AF_INET, &g_net_client.server_addr.sin_addr, resolved_ip, sizeof(resolved_ip));
-
     char status_buf[256];
-    snprintf(status_buf, sizeof(status_buf), "Connected to Room %u via %s:%d [Hole Punch Active] | Streaming audio...",
-             room_id, resolved_ip, ntohs(g_net_client.server_addr.sin_port));
+    snprintf(status_buf, sizeof(status_buf),
+             "JOINED Room %u [Token: %s | ICE Gathering Active] | Streaming audio...",
+             room_id, session_token);
     gui_update_status(status_buf);
 }
 
@@ -3399,15 +2691,7 @@ static void gui_handle_disconnect(void) {
     if (!g_gui.is_in_call) return;
 
     audio_engine_stop();
-    network_client_disconnect();
-    if (g_gui.is_host) {
-        char port_str[16] = {0};
-        GetWindowTextA(g_gui.hEditPort, port_str, sizeof(port_str));
-        int port = atoi(port_str);
-        if (port <= 0 || port > 65535) port = DEFAULT_RELAY_PORT;
-        upnp_unmap_port(port);
-        relay_server_stop();
-    }
+    ice_session_stop();
     crypto_cleanup();
 
     g_gui.is_in_call = false;
