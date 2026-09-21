@@ -1075,8 +1075,8 @@ static bool mqtt_subscribe(SOCKET s, const char *topic) {
     return ok;
 }
 
-static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, size_t max_topic, char *out_payload, size_t max_payload) {
-    if (!pkt || len < 4) return false;
+static int mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, size_t max_topic, char *out_payload, size_t max_payload) {
+    if (!pkt || len < 4) return 0;
     int p_start = -1;
     for (int i = 0; i <= len - 4; i++) {
         if ((pkt[i] & 0xF0) == 0x30) {
@@ -1084,7 +1084,7 @@ static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, siz
             break;
         }
     }
-    if (p_start == -1) return false;
+    if (p_start == -1) return len; // Skip non-publish bytes in stream
 
     int qos = (pkt[p_start] >> 1) & 0x03;
     int idx = p_start + 1;
@@ -1096,11 +1096,11 @@ static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, siz
         if ((b & 0x80) == 0) break;
         mult *= 128;
     }
-    if (idx + 2 > len) return false;
+    if (idx + 2 > len) return 0; // Incomplete header
 
     int t_len = ((int)pkt[idx] << 8) | (int)pkt[idx + 1];
     idx += 2;
-    if (idx + t_len > len) return false;
+    if (idx + t_len > len) return 0; // Incomplete topic
 
     if (out_topic && max_topic > 0) {
         int copy_t = (t_len < (int)max_topic - 1) ? t_len : (int)max_topic - 1;
@@ -1114,18 +1114,17 @@ static bool mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, siz
     }
 
     int pay_len = rem_len - 2 - t_len - (qos > 0 ? 2 : 0);
-    if (pay_len < 0) return false;
+    if (pay_len < 0) return 0;
     if (idx + pay_len > len) {
-        pay_len = len - idx;
+        return 0; // Incomplete payload, wait for more data
     }
-    if (pay_len < 0) return false;
 
     if (out_payload && max_payload > 0) {
         int copy_p = (pay_len < (int)max_payload - 1) ? pay_len : (int)max_payload - 1;
         memcpy(out_payload, pkt + idx, copy_p);
         out_payload[copy_p] = '\0';
     }
-    return true;
+    return idx + pay_len;
 }
 
 #pragma pack(push, 1)
@@ -1454,9 +1453,18 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
             }
         } else {
             buf[bytes] = '\0';
-            char r_topic[128] = {0};
-            char r_payload[4096] = {0};
-            if (mqtt_parse_publish(buf, bytes, r_topic, sizeof(r_topic), r_payload, sizeof(r_payload))) {
+            int offset = 0;
+            while (offset < bytes && g_ice.is_running) {
+                char r_topic[128] = {0};
+                char r_payload[4096] = {0};
+                int consumed = mqtt_parse_publish(buf + offset, bytes - offset,
+                                                  r_topic, sizeof(r_topic),
+                                                  r_payload, sizeof(r_payload));
+                if (consumed <= 0) break;
+                offset += consumed;
+
+                if (r_topic[0] == '\0') continue; // non-publish packet
+
                 net_log("ICE-SIGNAL", "RECV MQTT msg on [%s] (%d bytes payload)", r_topic, (int)strlen(r_payload));
 
                 // Check if message is remote description
@@ -1505,10 +1513,7 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
                 }
                 // Check if message is remote gathering done
                 else if (strstr(r_topic, "/done") != NULL) {
-                    EnterCriticalSection(&g_ice.cs);
-                    net_log("ICE-SIGNAL", "Remote gathering DONE received.");
-                    juice_set_remote_gathering_done(g_ice.agent);
-                    LeaveCriticalSection(&g_ice.cs);
+                    net_log("ICE-SIGNAL", "Remote gathering DONE received (ignoring lockout to allow trickle).");
                 }
             }
         }
@@ -1530,16 +1535,20 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
     return 0;
 }
 
-static bool ice_session_start(bool is_host, uint16_t room_id, const char *token) {
-    net_log("ICE", "Starting ICE session (is_host=%d, room_id=%u, token='%s')...",
-            is_host ? 1 : 0, room_id, token ? token : "none");
+static bool ice_session_start(bool is_host, uint16_t room_id, const char *token, int port) {
+    net_log("ICE", "Starting ICE session (is_host=%d, room_id=%u, token='%s', port=%d)...",
+            is_host ? 1 : 0, room_id, token ? token : "none", port);
 
     memset(&g_ice, 0, sizeof(g_ice));
     InitializeCriticalSection(&g_ice.cs);
     g_ice.is_host = is_host;
     g_ice.room_id = room_id;
     g_ice.mqtt_sock = INVALID_SOCKET;
-    if (token) strncpy_s(g_ice.session_token, sizeof(g_ice.session_token), token, _TRUNCATE);
+    if (token && token[0] != '\0') {
+        strncpy_s(g_ice.session_token, sizeof(g_ice.session_token), token, _TRUNCATE);
+    } else {
+        snprintf(g_ice.session_token, sizeof(g_ice.session_token), "room_%u", room_id);
+    }
 
     g_ice.my_sender_id = (uint32_t)GetCurrentProcessId() ^ (uint32_t)telemetry_now_us();
     if (g_ice.my_sender_id == 0) g_ice.my_sender_id = 1;
@@ -1551,23 +1560,13 @@ static bool ice_session_start(bool is_host, uint16_t room_id, const char *token)
     memset(&config, 0, sizeof(config));
     config.concurrency_mode = JUICE_CONCURRENCY_MODE_THREAD;
 
+    if (port > 0 && port <= 65535) {
+        config.local_port_range_begin = (uint16_t)port;
+        config.local_port_range_end = (uint16_t)(port + 10);
+    }
+
     config.stun_server_host = "stun.l.google.com";
     config.stun_server_port = 19302;
-
-    static juice_turn_server_t turn_servers[2];
-    memset(turn_servers, 0, sizeof(turn_servers));
-    turn_servers[0].host = "openrelay.metered.ca";
-    turn_servers[0].port = 80;
-    turn_servers[0].username = "openrelayproject";
-    turn_servers[0].password = "openrelayproject";
-
-    turn_servers[1].host = "openrelay.metered.ca";
-    turn_servers[1].port = 443;
-    turn_servers[1].username = "openrelayproject";
-    turn_servers[1].password = "openrelayproject";
-
-    config.turn_servers = turn_servers;
-    config.turn_servers_count = 2;
 
     config.cb_state_changed = on_juice_state_changed;
     config.cb_candidate = on_juice_candidate;
@@ -2398,7 +2397,7 @@ static void gui_handle_host(void) {
     gui_update_status("Starting ICE agent (STUN/TURN) & connecting to signaling...");
 
     // 5. Start libjuice ICE session
-    if (!ice_session_start(true, room_id, session_token)) {
+    if (!ice_session_start(true, room_id, session_token, port)) {
         crypto_cleanup();
         MessageBoxA(g_gui.hwndMain, "Failed to start libjuice ICE Agent!", "Error", MB_ICONERROR);
         gui_update_status("Failed to start ICE session.");
@@ -2542,7 +2541,7 @@ static void gui_handle_join(void) {
     }
 
     // 2. Start libjuice ICE session as peer (controlling = false)
-    if (!ice_session_start(false, room_id, session_token)) {
+    if (!ice_session_start(false, room_id, session_token, port)) {
         crypto_cleanup();
         MessageBoxA(g_gui.hwndMain, "Failed to start libjuice ICE Agent!", "Error", MB_ICONERROR);
         gui_update_status("Failed to start ICE session.");
