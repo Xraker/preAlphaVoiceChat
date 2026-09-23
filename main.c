@@ -1063,16 +1063,14 @@ static bool mqtt_subscribe(SOCKET s, const char *topic) {
     memcpy(pkt + idx, topic, t_len); idx += t_len;
     pkt[idx++] = 0x00; // Requested QoS: 0
 
-    if (send(s, (const char*)pkt, idx, 0) != idx) {
+    int sent = send(s, (const char*)pkt, idx, 0);
+    if (sent != idx) {
         net_log("MQTT", "FAIL: send(SUBSCRIBE) failed for topic '%s'", topic);
         return false;
     }
 
-    uint8_t ack[5];
-    int r = recv(s, (char*)ack, sizeof(ack), 0);
-    bool ok = (r >= 3 && ack[0] == 0x90);
-    net_log("MQTT", "SUBSCRIBE [%s] -> %s (SUBACK byte0=0x%02X)", topic, ok ? "SUCCESS" : "FAILED", (r > 0 ? ack[0] : 0));
-    return ok;
+    net_log("MQTT", "SUBSCRIBE [%s] sent successfully", topic);
+    return true;
 }
 
 static int mqtt_parse_publish(const uint8_t *pkt, int len, char *out_topic, size_t max_topic, char *out_payload, size_t max_payload) {
@@ -1391,7 +1389,7 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
             if (g_ice.mqtt_sock != INVALID_SOCKET) {
                 net_log("ICE-SIGNAL", "Connected to MQTT broker: %s", broker_used);
                 mqtt_subscribe(g_ice.mqtt_sock, sub_topic);
-                if (!g_ice.is_host) {
+                if (!g_ice.is_host && strlen(g_ice.session_token) == 0) {
                     mqtt_subscribe(g_ice.mqtt_sock, room_token_topic);
                 }
                 DWORD recv_to = 50; // 50ms timeout for non-blocking loop
@@ -2407,12 +2405,22 @@ static void gui_update_hud(void) {
             (g_ice.mqtt_sock != INVALID_SOCKET) ? "Connected" : "Reconnecting...",
             g_ice.session_token);
 
+        char stat_buf[256];
         if (g_ice.is_connected) {
-            char stat_buf[256];
             snprintf(stat_buf, sizeof(stat_buf), "Connected [%s]: %s | Voice Active",
                      conn_type, selected_desc);
-            SetWindowTextA(g_gui.hStaticStatus, stat_buf);
+        } else if (g_ice.state == JUICE_STATE_FAILED) {
+            snprintf(stat_buf, sizeof(stat_buf), "FAILED: All candidates exhausted (Router blocked WAN loopback)");
+        } else if (g_ice.state == JUICE_STATE_CONNECTING) {
+            snprintf(stat_buf, sizeof(stat_buf), "Connecting: Testing UDP hole punching (%s)...", selected_desc);
+        } else if (g_ice.state == JUICE_STATE_GATHERING) {
+            snprintf(stat_buf, sizeof(stat_buf), "Gathering STUN candidates (%d ready)...", g_ice.local_candidate_count);
+        } else if (g_ice.state == JUICE_STATE_DISCONNECTED) {
+            snprintf(stat_buf, sizeof(stat_buf), "ICE Disconnected.");
+        } else {
+            snprintf(stat_buf, sizeof(stat_buf), "ICE: %s", state_desc);
         }
+        SetWindowTextA(g_gui.hStaticStatus, stat_buf);
     }
 
     char hud_text[1600];
