@@ -10,6 +10,7 @@ pre-alpha-voice-chat/
 # Build artifacts & object files
 *.o
 *.obj
+*.log
 
 # Third-party submodule / vendored library
 libjuice/
