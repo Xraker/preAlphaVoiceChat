@@ -1270,11 +1270,21 @@ static void on_juice_candidate(juice_agent_t *agent, const char *sdp, void *user
     (void)agent;
     (void)user_ptr;
     EnterCriticalSection(&g_ice.cs);
-    net_log("ICE-CAND", "Gathered local candidate #%d: %s", g_ice.local_candidate_count, sdp);
+    net_log("ICE-CAND", "Gathered candidate from libjuice: %s", sdp);
+
+    // Completely disable LAN connection: drop local host candidates to enforce WAN UDP hole punching
+    if (strstr(sdp, "typ host") != NULL) {
+        net_log("ICE-CAND", "--> [LAN DISABLED] Filtered out local host candidate to test WAN hole punching: %s", sdp);
+        LeaveCriticalSection(&g_ice.cs);
+        return;
+    }
+
     if (g_ice.local_candidate_count < 32) {
         strncpy_s(g_ice.local_candidates[g_ice.local_candidate_count],
                   sizeof(g_ice.local_candidates[0]), sdp, _TRUNCATE);
         g_ice.local_candidate_count++;
+        net_log("ICE-CAND", "--> Queued local candidate #%d for signaling: %s",
+                g_ice.local_candidate_count - 1, sdp);
     }
     LeaveCriticalSection(&g_ice.cs);
 }
@@ -1511,6 +1521,7 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
 
                             // Flush any candidates that were queued before description arrived
                             for (int q = 0; q < g_ice.queued_candidate_count; q++) {
+                                if (strstr(g_ice.queued_candidates[q], "typ host") != NULL) continue;
                                 net_log("ICE-SIGNAL", "Adding queued remote candidate #%d: '%s'", q, g_ice.queued_candidates[q]);
                                 juice_add_remote_candidate(g_ice.agent, g_ice.queued_candidates[q]);
                             }
@@ -1525,6 +1536,13 @@ static DWORD WINAPI ice_signaling_thread(LPVOID param) {
                 else if (strstr(r_topic, "/cand") != NULL && strstr(r_topic, "/done") == NULL) {
                     EnterCriticalSection(&g_ice.cs);
                     if (strlen(r_payload) > 0) {
+                        // Completely disable LAN connections: drop remote host candidates
+                        if (strstr(r_payload, "typ host") != NULL) {
+                            net_log("ICE-SIGNAL", "--> [LAN DISABLED] Ignored remote host candidate to enforce WAN hole punching: '%s'", r_payload);
+                            LeaveCriticalSection(&g_ice.cs);
+                            continue;
+                        }
+
                         if (g_ice.remote_sdp_set) {
                             net_log("ICE-SIGNAL", "Adding remote candidate: '%s'", r_payload);
                             int res = juice_add_remote_candidate(g_ice.agent, r_payload);
@@ -2214,6 +2232,32 @@ static bool parse_invite_string(const char *invite,
     return true;
 }
 
+static const char *get_connection_type_str(void) {
+    if (!g_ice.is_connected) return "Negotiating / Disconnected";
+    if (strstr(g_ice.selected_local_cand, "typ host") && strstr(g_ice.selected_remote_cand, "typ host")) {
+        return "LAN";
+    }
+    if (strstr(g_ice.selected_local_cand, "typ relay") || strstr(g_ice.selected_remote_cand, "typ relay")) {
+        return "Relay (TURN)";
+    }
+    if (strstr(g_ice.selected_local_cand, "typ srflx") || strstr(g_ice.selected_remote_cand, "typ srflx")) {
+        return "WAN (P2P)";
+    }
+    // Fallback: check remote IP address format
+    if (strncmp(g_ice.selected_remote, "192.168.", 8) == 0 ||
+        strncmp(g_ice.selected_remote, "10.", 3) == 0 ||
+        strncmp(g_ice.selected_remote, "127.", 4) == 0 ||
+        strncmp(g_ice.selected_remote, "172.16.", 7) == 0 ||
+        strncmp(g_ice.selected_remote, "172.17.", 7) == 0 ||
+        strncmp(g_ice.selected_remote, "172.18.", 7) == 0 ||
+        strncmp(g_ice.selected_remote, "172.19.", 7) == 0 ||
+        strncmp(g_ice.selected_remote, "172.2", 5) == 0 ||
+        strncmp(g_ice.selected_remote, "172.3", 5) == 0) {
+        return "LAN";
+    }
+    return "WAN (P2P)";
+}
+
 static void gui_update_hud(void) {
     if (!g_gui.hEditHud || !IsWindow(g_gui.hEditHud)) return;
 
@@ -2222,19 +2266,30 @@ static void gui_update_hud(void) {
     TelemetryState snap;
     telemetry_get_snapshot(&snap);
 
+    // If connected but address strings are empty, query them
+    if (g_ice.is_connected && g_ice.agent && g_ice.selected_local[0] == '\0') {
+        EnterCriticalSection(&g_ice.cs);
+        juice_get_selected_addresses(g_ice.agent, g_ice.selected_local, sizeof(g_ice.selected_local),
+                                     g_ice.selected_remote, sizeof(g_ice.selected_remote));
+        juice_get_selected_candidates(g_ice.agent, g_ice.selected_local_cand, sizeof(g_ice.selected_local_cand),
+                                      g_ice.selected_remote_cand, sizeof(g_ice.selected_remote_cand));
+        LeaveCriticalSection(&g_ice.cs);
+    }
+
     int active_peers = ice_get_active_peers();
     char mic_str[64];
-    char peer_str[64];
-    char presence_desc[64];
+    char peer_str[80];
+    char presence_desc[80];
     const char *status_str = "DISCONNECTED";
     const char *mic_activity_desc = "IDLE";
+    const char *conn_type = get_connection_type_str();
 
     if (g_gui.is_testing_mic) {
         if (snap.mic_peak_level > 600) {
-            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: HEARING VOICE ] (Level: %d)", snap.mic_peak_level);
+            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: LIVE ] (Level: %d)", snap.mic_peak_level);
             mic_activity_desc = "HEARING VOICE (PLAYBACK)";
         } else {
-            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: SPEAK TO TEST ] (Silence)");
+            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: TEST ] (Silence)");
             mic_activity_desc = "IDLE (Silence)";
         }
         strcpy_s(peer_str, sizeof(peer_str), "[ Loopback Test Mode ]");
@@ -2242,18 +2297,23 @@ static void gui_update_hud(void) {
         status_str = "MIC LOOPBACK TEST (LOCAL PLAYBACK)";
     } else if (g_gui.is_in_call) {
         if (snap.mic_peak_level > 600) {
-            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: TRANSMITTING ] (Level: %d)", snap.mic_peak_level);
+            snprintf(mic_str, sizeof(mic_str), "[ ● MIC: LIVE ] (Level: %d)", snap.mic_peak_level);
             mic_activity_desc = "TRANSMITTING VOICE";
         } else {
-            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: IDLE (Silence) ]");
+            snprintf(mic_str, sizeof(mic_str), "[ ○ MIC: IDLE ] (Silence)");
             mic_activity_desc = "IDLE (Silence)";
         }
 
         int total_in_room = active_peers + 1;
-        snprintf(peer_str, sizeof(peer_str), "● Room: %d %s in room",
-                 total_in_room, (total_in_room == 1) ? "Person" : "People");
-        snprintf(presence_desc, sizeof(presence_desc), "%d %s in room",
-                 total_in_room, (total_in_room == 1) ? "Person" : "People");
+        if (total_in_room > 1) {
+            snprintf(peer_str, sizeof(peer_str), "● Room: %d People [%s]",
+                     total_in_room, conn_type);
+            snprintf(presence_desc, sizeof(presence_desc), "%d People in room (%s)",
+                     total_in_room, conn_type);
+        } else {
+            snprintf(peer_str, sizeof(peer_str), "● Room: 1 Person");
+            snprintf(presence_desc, sizeof(presence_desc), "1 Person in room (Waiting for peer)");
+        }
         status_str = g_gui.is_host ? "HOSTING & STREAMING" : "CONNECTED & STREAMING";
     } else {
         strcpy_s(mic_str, sizeof(mic_str), "[ ○ MIC: OFF ]");
@@ -2281,18 +2341,18 @@ static void gui_update_hud(void) {
             }
             LeaveCriticalSection(&g_ice.cs);
 
-            char part_buf[64];
+            char part_buf[96];
             if (peer_count == 0) {
                 if (g_ice.is_connected) {
-                    strcpy_s(part_buf, sizeof(part_buf), "Participant: Remote Peer (Connected)");
+                    snprintf(part_buf, sizeof(part_buf), "Participant: Remote [%s]", conn_type);
                     peer_count = 1;
                 } else {
-                    strcpy_s(part_buf, sizeof(part_buf), "Participant: None (Waiting for peer)");
+                    strcpy_s(part_buf, sizeof(part_buf), "Participant: None (Waiting)");
                 }
             } else if (peer_count == 1) {
-                snprintf(part_buf, sizeof(part_buf), "Participant: Peer #%04X (Active)", active_id & 0xFFFF);
+                snprintf(part_buf, sizeof(part_buf), "Participant: #%04X [%s]", active_id & 0xFFFF, conn_type);
             } else {
-                snprintf(part_buf, sizeof(part_buf), "Participants: %d active peers in room", peer_count);
+                snprintf(part_buf, sizeof(part_buf), "Participants: %d active [%s]", peer_count, conn_type);
             }
             SetWindowTextA(g_gui.hStaticParticipant, part_buf);
         } else {
@@ -2308,7 +2368,7 @@ static void gui_update_hud(void) {
             if (g_gui.hSliderPeerVol) ShowWindow(g_gui.hSliderPeerVol, show_cmd);
             if (g_gui.hStaticVolVal) ShowWindow(g_gui.hStaticVolVal, show_cmd);
 
-            RECT rcBox = { 240, 275, 535, 318 };
+            RECT rcBox = { 280, 275, 580, 318 };
             InvalidateRect(g_gui.hwndMain, &rcBox, TRUE);
         }
     }
@@ -2325,7 +2385,7 @@ static void gui_update_hud(void) {
         const char *state_desc = juice_state_to_string(g_ice.state);
         char selected_desc[256];
         if (g_ice.is_connected && g_ice.selected_local[0] && g_ice.selected_remote[0]) {
-            snprintf(selected_desc, sizeof(selected_desc), "%s <--> %s",
+            snprintf(selected_desc, sizeof(selected_desc), "%s <-> %s",
                      g_ice.selected_local, g_ice.selected_remote);
         } else {
             strcpy_s(selected_desc, sizeof(selected_desc), "Gathering/Negotiating candidate pairs...");
@@ -2334,20 +2394,23 @@ static void gui_update_hud(void) {
         snprintf(ice_diag_section, sizeof(ice_diag_section),
             " -------------------------------------------------------\r\n"
             " [ICE NAT TRAVERSAL DIAGNOSTICS (libjuice RFC 8445)]\r\n"
+            " Mode:            WAN P2P Enforced (LAN Host Disabled)\r\n"
             " ICE State:       %s\r\n"
-            " Candidates:      %d local gathered (STUN: Google, TURN: Metered)\r\n"
+            " Connection Type: %s\r\n"
             " Active Path:     %s\r\n"
+            " WAN Candidates:  %d local gathered (STUN: Google)\r\n"
             " Signaling (MQTT):%s (Session: %s)\r\n",
             state_desc,
-            g_ice.local_candidate_count,
+            g_ice.is_connected ? conn_type : "Negotiating...",
             selected_desc,
+            g_ice.local_candidate_count,
             (g_ice.mqtt_sock != INVALID_SOCKET) ? "Connected" : "Reconnecting...",
             g_ice.session_token);
 
         if (g_ice.is_connected) {
             char stat_buf[256];
-            snprintf(stat_buf, sizeof(stat_buf), "Connected via %s [ICE: %s] | Audio Active",
-                     selected_desc, state_desc);
+            snprintf(stat_buf, sizeof(stat_buf), "Connected [%s]: %s | Voice Active",
+                     conn_type, selected_desc);
             SetWindowTextA(g_gui.hStaticStatus, stat_buf);
         }
     }
@@ -2357,6 +2420,7 @@ static void gui_update_hud(void) {
         "================== LIVE TELEMETRY HUD ==================\r\n"
         " Room Status:     %s\r\n"
         " Room Presence:   %s\r\n"
+        " Connection:      %s\r\n"
         " Mic Activity:    [%s] %s\r\n"
         " -------------------------------------------------------\r\n"
         " Bandwidth OUT:   %6.2f KB/s   | Bandwidth IN:    %6.2f KB/s\r\n"
@@ -2369,6 +2433,7 @@ static void gui_update_hud(void) {
         "========================================================\r\n",
         status_str,
         presence_desc,
+        g_ice.is_connected ? conn_type : "Negotiating...",
         mic_bar, mic_activity_desc,
         snap.kb_per_sec_out, snap.kb_per_sec_in,
         snap.last_rtt_ms, snap.jitter_ms,
@@ -2744,7 +2809,7 @@ static void gui_handle_disconnect(void) {
     if (g_gui.hStaticVolLabel) ShowWindow(g_gui.hStaticVolLabel, SW_HIDE);
     if (g_gui.hSliderPeerVol) ShowWindow(g_gui.hSliderPeerVol, SW_HIDE);
     if (g_gui.hStaticVolVal) ShowWindow(g_gui.hStaticVolVal, SW_HIDE);
-    RECT rcVol = { 240, 275, 535, 318 };
+    RECT rcVol = { 280, 275, 580, 318 };
     InvalidateRect(g_gui.hwndMain, &rcVol, TRUE);
 
     if (g_gui.hStaticMic) SetWindowTextA(g_gui.hStaticMic, "[ ○ MIC: OFF ]");
@@ -2771,65 +2836,65 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Group 1: Room & Connection Settings
             CreateWindowA("BUTTON", " Room & Connection Setup ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 10, 525, 155, hwnd, NULL, NULL, NULL);
+                          15, 10, 570, 155, hwnd, NULL, NULL, NULL);
 
             // Invite Code row:
             CreateWindowA("STATIC", "Invite Code:", WS_CHILD | WS_VISIBLE, 25, 30, 75, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditInvite = CreateWindowA("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                              105, 28, 240, 22, hwnd, (HMENU)IDC_EDIT_INVITE, NULL, NULL);
+                                              105, 28, 290, 22, hwnd, (HMENU)IDC_EDIT_INVITE, NULL, NULL);
 
             g_gui.hBtnCopyInvite = CreateWindowA("BUTTON", "Copy Invite", WS_CHILD | WS_VISIBLE,
-                                                 355, 27, 85, 24, hwnd, (HMENU)IDC_BTN_COPY_INVITE, NULL, NULL);
+                                                 405, 27, 80, 24, hwnd, (HMENU)IDC_BTN_COPY_INVITE, NULL, NULL);
 
             g_gui.hBtnPasteInvite = CreateWindowA("BUTTON", "Paste Invite", WS_CHILD | WS_VISIBLE,
-                                                  445, 27, 85, 24, hwnd, (HMENU)IDC_BTN_PASTE_INVITE, NULL, NULL);
+                                                  495, 27, 80, 24, hwnd, (HMENU)IDC_BTN_PASTE_INVITE, NULL, NULL);
 
             // Manual Connection Details row:
             CreateWindowA("STATIC", "Host IP:", WS_CHILD | WS_VISIBLE, 25, 58, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditIp = CreateWindowA("EDIT", "127.0.0.1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                          80, 56, 130, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
+                                          85, 56, 150, 22, hwnd, (HMENU)IDC_EDIT_IP, NULL, NULL);
 
-            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 220, 58, 35, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Port:", WS_CHILD | WS_VISIBLE, 245, 58, 35, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditPort = CreateWindowA("EDIT", "7777", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            255, 56, 50, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
+                                            285, 56, 50, 22, hwnd, (HMENU)IDC_EDIT_PORT, NULL, NULL);
 
-            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 315, 58, 55, 20, hwnd, NULL, NULL, NULL);
+            CreateWindowA("STATIC", "Room ID:", WS_CHILD | WS_VISIBLE, 345, 58, 55, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditRoom = CreateWindowA("EDIT", "1", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                                            370, 56, 45, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
+                                            405, 56, 45, 22, hwnd, (HMENU)IDC_EDIT_ROOM, NULL, NULL);
 
             CreateWindowA("STATIC", "Secret Key:", WS_CHILD | WS_VISIBLE, 25, 86, 70, 20, hwnd, NULL, NULL, NULL);
             g_gui.hEditKey = CreateWindowA("EDIT", "voicechat2026", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                           100, 84, 315, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
+                                           100, 84, 350, 22, hwnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
 
             // Distinct Action Buttons:
             g_gui.hBtnHost = CreateWindowA("BUTTON", "Create && Host Room",
                                            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                           25, 116, 165, 34, hwnd, (HMENU)IDC_BTN_HOST, NULL, NULL);
+                                           25, 116, 175, 34, hwnd, (HMENU)IDC_BTN_HOST, NULL, NULL);
 
             g_gui.hBtnJoin = CreateWindowA("BUTTON", "Join Existing Room",
                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                           200, 116, 165, 34, hwnd, (HMENU)IDC_BTN_JOIN, NULL, NULL);
+                                           210, 116, 175, 34, hwnd, (HMENU)IDC_BTN_JOIN, NULL, NULL);
 
             g_gui.hBtnDisconnect = CreateWindowA("BUTTON", "Disconnect",
                                                  WS_CHILD | WS_VISIBLE | WS_DISABLED,
-                                                 375, 116, 155, 34, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
+                                                 395, 116, 180, 34, hwnd, (HMENU)IDC_BTN_DISCONNECT, NULL, NULL);
 
             // Group 2: Audio Hardware
             CreateWindowA("BUTTON", " Audio Hardware (WASAPI Event-Driven) ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 172, 525, 84, hwnd, NULL, NULL, NULL);
+                          15, 172, 570, 84, hwnd, NULL, NULL, NULL);
 
             CreateWindowA("STATIC", "Microphone:", WS_CHILD | WS_VISIBLE, 25, 194, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboMic = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 191, 290, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
+                                            110, 191, 325, 150, hwnd, (HMENU)IDC_COMBO_MIC, NULL, NULL);
 
             CreateWindowA("STATIC", "Speakers:", WS_CHILD | WS_VISIBLE, 25, 224, 80, 20, hwnd, NULL, NULL, NULL);
             g_gui.hComboSpk = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                            110, 221, 290, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
+                                            110, 221, 325, 150, hwnd, (HMENU)IDC_COMBO_SPK, NULL, NULL);
 
             g_gui.hBtnTestMic = CreateWindowA("BUTTON", "Test Mic\n(Loopback)",
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_MULTILINE,
-                                              410, 191, 120, 54, hwnd, (HMENU)IDC_BTN_TEST_MIC, NULL, NULL);
+                                              445, 191, 130, 54, hwnd, (HMENU)IDC_BTN_TEST_MIC, NULL, NULL);
 
             // Populate Audio Device Dropdowns
             for (int i = 0; i < g_audio.capture_devices.count; i++) {
@@ -2849,44 +2914,44 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // Group 3: Participants & Volume Control
             CreateWindowA("BUTTON", " Participants & Volume Control ",
                           WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                          15, 262, 525, 60, hwnd, NULL, NULL, NULL);
+                          15, 262, 570, 60, hwnd, NULL, NULL, NULL);
 
             g_gui.hStaticParticipant = CreateWindowA("STATIC", "Participant: None (Disconnected)",
                                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                                     25, 286, 215, 20, hwnd, NULL, NULL, NULL);
+                                                     25, 286, 250, 20, hwnd, NULL, NULL, NULL);
 
-            g_gui.hStaticVolLabel = CreateWindowA("STATIC", "Volume:", WS_CHILD, 245, 286, 50, 20, hwnd, NULL, NULL, NULL);
+            g_gui.hStaticVolLabel = CreateWindowA("STATIC", "Volume:", WS_CHILD, 285, 286, 48, 20, hwnd, NULL, NULL, NULL);
 
             g_gui.hSliderPeerVol = CreateWindowA(TRACKBAR_CLASSA, "PeerVolume",
                                                  WS_CHILD | TBS_HORZ | TBS_AUTOTICKS,
-                                                 295, 282, 160, 28, hwnd, (HMENU)IDC_SLIDER_PEER_VOL, NULL, NULL);
+                                                 335, 282, 180, 28, hwnd, (HMENU)IDC_SLIDER_PEER_VOL, NULL, NULL);
             SendMessage(g_gui.hSliderPeerVol, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
             SendMessage(g_gui.hSliderPeerVol, TBM_SETPOS, TRUE, 100);
             SendMessage(g_gui.hSliderPeerVol, TBM_SETTICFREQ, 25, 0);
 
             g_gui.hStaticVolVal = CreateWindowA("STATIC", "100%",
                                                 WS_CHILD | SS_LEFT,
-                                                465, 286, 65, 20, hwnd, NULL, NULL, NULL);
+                                                525, 286, 50, 20, hwnd, NULL, NULL, NULL);
             g_gui.volume_controls_visible = false;
 
             // Live Indicators: Mic Activity & Room Presence
             g_gui.hStaticMic = CreateWindowA("STATIC", "[ ○ MIC: OFF ]",
                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                             15, 330, 230, 20, hwnd, NULL, NULL, NULL);
+                                             15, 330, 220, 20, hwnd, NULL, NULL, NULL);
 
             g_gui.hStaticPeers = CreateWindowA("STATIC", "Room: Disconnected",
-                                               WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                                               250, 330, 180, 20, hwnd, NULL, NULL, NULL);
+                                               WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                               240, 330, 225, 20, hwnd, NULL, NULL, NULL);
 
             g_gui.hChkHud = CreateWindowA("BUTTON", "Live Telemetry",
                                           WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                          440, 330, 100, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
+                                          475, 330, 110, 20, hwnd, (HMENU)IDC_CHK_HUD, NULL, NULL);
             SendMessage(g_gui.hChkHud, BM_SETCHECK, BST_CHECKED, 0);
 
             // Live Telemetry Readout Box
             g_gui.hEditHud = CreateWindowA("EDIT", "",
                                            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-                                           15, 354, 525, 140, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
+                                           15, 354, 570, 140, hwnd, (HMENU)IDC_EDIT_HUD, NULL, NULL);
             SendMessage(g_gui.hEditHud, WM_SETFONT, (WPARAM)g_gui.hFontMono, TRUE);
 
             // Bottom Bar: Dark Mode Toggle (very bottom left) & Status Bar Label
@@ -2896,7 +2961,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             g_gui.hStaticStatus = CreateWindowA("STATIC", "Ready. Host a room or join with an invite code.",
                                                 WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
-                                                115, 506, 425, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
+                                                115, 506, 470, 20, hwnd, (HMENU)IDC_STATIC_STATUS, NULL, NULL);
 
             // Apply system fonts to all controls
             HWND child = GetWindow(hwnd, GW_CHILD);
@@ -3090,7 +3155,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                                 "preAlphaVoiceChat - Win32 Low-Latency Voice Client",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
-                                575, 575,
+                                620, 580,
                                 NULL, NULL, hInstance, NULL);
 
     if (!hwnd) {
